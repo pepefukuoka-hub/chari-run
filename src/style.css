@@ -1,0 +1,29 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: #10222e;
+  font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
+  display: flex;
+  justify-content: center;
+}
+#wrap {
+  width: min(96vw, 960px);
+  padding: 12px 0 20px;
+  text-align: center;
+}
+canvas {
+  width: 100%;
+  height: auto;
+  display: block;
+  background: #aee3ff;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.note {
+  color: #bcd6e4;
+  font-size: 13px;
+  margin: 10px 4px 0;
+}
