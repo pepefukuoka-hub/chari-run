@@ -150,6 +150,34 @@ class Geo {
     return this;
   }
 
+  // 弧（XY平面の輪の一部。表情の線などに使う）。a0〜a1 はラジアン、正面は +z
+  arc(m, color, R0 = 1, r0 = 0.2, a0 = 0, a1 = Math.PI, seg = 10, tube = 6) {
+    const nm = M4.normal3(m);
+    const P = (i, j) => {
+      const u = a0 + (i / seg) * (a1 - a0), v = (j / tube) * TAU;
+      const cx = Math.cos(u), cy = Math.sin(u);
+      const n = [Math.cos(v) * cx, Math.cos(v) * cy, Math.sin(v)];
+      return [[cx * R0 + n[0] * r0, cy * R0 + n[1] * r0, n[2] * r0], n];
+    };
+    const k = (p, n) => Geo.pick(color, p, n);
+    for (let i = 0; i < seg; i++) {
+      for (let j = 0; j < tube; j++) {
+        const [a, na] = P(i, j), [b, nb] = P(i + 1, j), [c, nc] = P(i + 1, j + 1), [d, nd] = P(i, j + 1);
+        this._tri(m, nm, a, b, d, na, nb, nd, k(a, na), k(b, nb), k(d, nd));
+        this._tri(m, nm, b, c, d, nb, nc, nd, k(b, nb), k(c, nc), k(d, nd));
+      }
+    }
+    // 両端を丸くふさぐ
+    for (const [u, s] of [[a0, -1], [a1, 1]]) {
+      const cx = Math.cos(u) * R0, cy = Math.sin(u) * R0;
+      const sm = M4.ident();
+      M4.translate(sm, cx, cy, 0);
+      this.sphere(M4.mul(m, M4.scale(sm, r0, r0, r0)), color, 6, 4);
+      void s;
+    }
+    return this;
+  }
+
   mesh() { return makeMesh(this); }
 }
 
