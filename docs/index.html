@@ -2,456 +2,2477 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>チャリラン｜チャリ走風・自転車ジャンプゲーム</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>ころんの空島アドベンチャー</title>
 <style>* { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; }
-body {
-  background: #10222e;
-  font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
-  display: flex;
-  justify-content: center;
-}
-#wrap {
-  width: min(96vw, 960px);
-  padding: 12px 0 20px;
-  text-align: center;
+html, body {
+  margin: 0; padding: 0; width: 100%; height: 100%;
+  overflow: hidden; background: #7fc4f0;
+  font-family: "Hiragino Maru Gothic ProN", "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif;
+  overscroll-behavior: none;
 }
 canvas {
-  width: 100%;
-  height: auto;
-  display: block;
-  background: #aee3ff;
-  border-radius: 12px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
-  touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
+  position: fixed; left: 0; top: 0; width: 100vw; height: 100vh; display: block;
+  touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
-.note {
-  color: #bcd6e4;
-  font-size: 13px;
-  margin: 10px 4px 0;
-}
+#hud { z-index: 2; }
 </style>
 </head>
 <body>
-<div id="wrap">
-  <canvas id="game" width="960" height="540"></canvas>
-  <p class="note">長押しでジャンプをためて、離すと飛ぶ。障害物に当たると転倒。スマホ・PC両対応。</p>
-</div>
-<script>// チャリラン：チャリ走風の自転車ジャンプゲーム
-// 長押しでジャンプをため、離すと飛ぶ。障害物の側面に当たると転倒、上には乗れる。
-(() => {
-  'use strict';
-
-  const cv = document.getElementById('game');
-  const ctx = cv.getContext('2d');
-  const W = 960, H = 540;
-  const GROUND_Y = 452;
-  const GRAV = 2500;
-  const PX = 200; // 自転車の画面上の基準位置
-
-  const S = {
-    mode: 'title', // title | run | over
-    t: 0,
-    overAt: 0,
-    dist: 0,
-    speed: 0,
-    best: Number(localStorage.getItem('chari-run-best') || 0),
-    charge: 0,
-    charging: false,
-    py: GROUND_Y, // タイヤ接地点の高さ
-    vy: 0,
-    grounded: true,
-    wheel: 0,
-    bgx: 0,
-    obstacles: [],
-    spawnIn: 600,
-    crashRot: 0,
-    clouds: [
-      { x: 120, y: 74, s: 1.0 },
-      { x: 430, y: 118, s: 0.7 },
-      { x: 760, y: 62, s: 1.25 },
-    ],
+<canvas id="gl"></canvas>
+<canvas id="hud"></canvas>
+<script>(() => {
+'use strict';
+// ===== 00_math.js =====
+// 数学ユーティリティ（ベクトル・行列）
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const lerp = (a, b, t) => a + (b - a) * t;
+const approach = (v, t, d) => (v < t ? Math.min(v + d, t) : Math.max(v - d, t));
+const smooth = (t) => t * t * (3 - 2 * t);
+function angDiff(a, b) {
+  let d = (b - a) % TAU;
+  if (d > Math.PI) d -= TAU;
+  if (d < -Math.PI) d += TAU;
+  return d;
+}
+// 疑似乱数（シード固定。ステージの飾りを毎回同じ配置にするため）
+function makeRng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
 
-  function reset() {
-    S.dist = 0;
-    S.speed = 330;
-    S.py = GROUND_Y;
-    S.vy = 0;
-    S.grounded = true;
-    S.charge = 0;
-    S.charging = false;
-    S.obstacles = [];
-    S.spawnIn = 650;
-    S.crashRot = 0;
+const v3 = {
+  len: (a) => Math.hypot(a[0], a[1], a[2]),
+  sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+  norm(a) {
+    const l = Math.hypot(a[0], a[1], a[2]) || 1;
+    return [a[0] / l, a[1] / l, a[2] / l];
+  },
+  cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+  dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+};
+
+// 4x4行列（列優先, Float32Array）。translate などは右から掛ける（m = m * X）
+const M4 = {
+  ident(out = new Float32Array(16)) {
+    out.fill(0);
+    out[0] = out[5] = out[10] = out[15] = 1;
+    return out;
+  },
+  copy(a, out = new Float32Array(16)) { out.set(a); return out; },
+  mul(a, b, out = new Float32Array(16)) {
+    for (let c = 0; c < 4; c++) {
+      for (let r = 0; r < 4; r++) {
+        out[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
+      }
+    }
+    return out;
+  },
+  persp(fovy, asp, n, f) {
+    const t = 1 / Math.tan(fovy / 2), m = new Float32Array(16);
+    m[0] = t / asp; m[5] = t; m[10] = (f + n) / (n - f); m[11] = -1; m[14] = (2 * f * n) / (n - f);
+    return m;
+  },
+  ortho(l, r, b, t, n, f) {
+    const m = new Float32Array(16);
+    m[0] = 2 / (r - l); m[5] = 2 / (t - b); m[10] = -2 / (f - n);
+    m[12] = -(r + l) / (r - l); m[13] = -(t + b) / (t - b); m[14] = -(f + n) / (f - n); m[15] = 1;
+    return m;
+  },
+  lookAt(e, c, u) {
+    const z = v3.norm(v3.sub(e, c));
+    const x = v3.norm(v3.cross(u, z));
+    const y = v3.cross(z, x);
+    const m = new Float32Array(16);
+    m[0] = x[0]; m[4] = x[1]; m[8] = x[2];
+    m[1] = y[0]; m[5] = y[1]; m[9] = y[2];
+    m[2] = z[0]; m[6] = z[1]; m[10] = z[2];
+    m[12] = -v3.dot(x, e); m[13] = -v3.dot(y, e); m[14] = -v3.dot(z, e); m[15] = 1;
+    return m;
+  },
+  translate(m, x, y, z) {
+    for (let i = 0; i < 4; i++) m[12 + i] += m[i] * x + m[4 + i] * y + m[8 + i] * z;
+    return m;
+  },
+  rotY(m, a) {
+    const c = Math.cos(a), s = Math.sin(a);
+    for (let i = 0; i < 4; i++) {
+      const a0 = m[i], a2 = m[8 + i];
+      m[i] = a0 * c - a2 * s;
+      m[8 + i] = a0 * s + a2 * c;
+    }
+    return m;
+  },
+  rotX(m, a) {
+    const c = Math.cos(a), s = Math.sin(a);
+    for (let i = 0; i < 4; i++) {
+      const a1 = m[4 + i], a2 = m[8 + i];
+      m[4 + i] = a1 * c + a2 * s;
+      m[8 + i] = -a1 * s + a2 * c;
+    }
+    return m;
+  },
+  rotZ(m, a) {
+    const c = Math.cos(a), s = Math.sin(a);
+    for (let i = 0; i < 4; i++) {
+      const a0 = m[i], a1 = m[4 + i];
+      m[i] = a0 * c + a1 * s;
+      m[4 + i] = -a0 * s + a1 * c;
+    }
+    return m;
+  },
+  scale(m, x, y, z) {
+    for (let i = 0; i < 4; i++) { m[i] *= x; m[4 + i] *= y; m[8 + i] *= z; }
+    return m;
+  },
+  // 法線用 3x3（上3x3の逆転置）
+  normal3(m, out = new Float32Array(9)) {
+    const a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f = m[6], g = m[8], h = m[9], i = m[10];
+    const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
+    const det = a * A + b * B + c * C || 1;
+    const k = 1 / det;
+    out[0] = A * k; out[1] = B * k; out[2] = C * k;
+    out[3] = -(b * i - c * h) * k; out[4] = (a * i - c * g) * k; out[5] = -(a * h - b * g) * k;
+    out[6] = (b * f - c * e) * k; out[7] = -(a * f - c * d) * k; out[8] = (a * e - b * d) * k;
+    return out;
+  },
+  xform(m, p) {
+    return [
+      m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
+      m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+      m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
+    ];
+  },
+};
+
+// ===== 10_gl.js =====
+// WebGL2 描画まわり（シェーダー・メッシュ・描画呼び出し）
+const glCanvas = document.getElementById('gl');
+const gl = glCanvas.getContext('webgl2', { antialias: true, alpha: false, powerPreference: 'high-performance' });
+
+const R = {
+  ok: !!gl,
+  w: 1, h: 1, dpr: 1,
+  vp: M4.ident(),
+  view: M4.ident(),
+  cam: [0, 0, 0],
+  light: v3.norm([0.45, 0.85, 0.3]),
+  fogCol: [0.62, 0.8, 0.95],
+  fog: [45, 150],
+  prog: null,
+  u: {},
+  tmpN: new Float32Array(9),
+  drawCalls: 0,
+};
+
+const VS = `#version 300 es
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNor;
+layout(location=2) in vec3 aCol;
+uniform mat4 uVP;
+uniform mat4 uM;
+uniform mat3 uN;
+out vec3 vN; out vec3 vC; out vec3 vW;
+void main(){
+  vec4 w = uM * vec4(aPos, 1.0);
+  vW = w.xyz;
+  vN = normalize(uN * aNor);
+  vC = aCol;
+  gl_Position = uVP * w;
+}`;
+
+const FS = `#version 300 es
+precision highp float;
+in vec3 vN; in vec3 vC; in vec3 vW;
+uniform vec3 uTint;
+uniform vec3 uLight;
+uniform vec3 uCam;
+uniform vec3 uFogCol;
+uniform vec2 uFog;
+uniform float uEmit;
+uniform float uAlpha;
+out vec4 o;
+void main(){
+  vec3 n = normalize(vN);
+  if (!gl_FrontFacing) n = -n;
+  vec3 col = vC * uTint;
+  float d = dot(n, uLight);
+  float diff = smoothstep(-0.05, 0.6, d) * 0.85 + max(d, 0.0) * 0.15;
+  float hemi = n.y * 0.5 + 0.5;
+  vec3 amb = mix(vec3(0.42, 0.36, 0.46), vec3(0.66, 0.76, 0.9), hemi);
+  vec3 v = normalize(uCam - vW);
+  float rim = pow(1.0 - max(dot(n, v), 0.0), 3.0) * 0.22;
+  vec3 h = normalize(uLight + v);
+  float spec = pow(max(dot(n, h), 0.0), 40.0) * 0.12;
+  vec3 lit = col * (amb * 0.72 + vec3(1.0, 0.95, 0.86) * diff * 0.78) + (rim + spec) * vec3(1.0, 0.97, 0.92);
+  lit = mix(lit, col, uEmit);
+  float dist = length(uCam - vW);
+  float f = clamp((dist - uFog.x) / (uFog.y - uFog.x), 0.0, 1.0);
+  lit = mix(lit, uFogCol, f * f * (1.0 - uEmit * 0.5));
+  o = vec4(lit, uAlpha);
+}`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+function initGL() {
+  if (!gl) return;
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  R.prog = p;
+  for (const n of ['uVP', 'uM', 'uN', 'uTint', 'uLight', 'uCam', 'uFogCol', 'uFog', 'uEmit', 'uAlpha']) {
+    R.u[n] = gl.getUniformLocation(p, n);
+  }
+  gl.enable(gl.DEPTH_TEST);
+  gl.enable(gl.CULL_FACE);
+  gl.cullFace(gl.BACK);
+}
+
+function resizeGL() {
+  R.dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(1, Math.floor(window.innerWidth * R.dpr));
+  const h = Math.max(1, Math.floor(window.innerHeight * R.dpr));
+  if (glCanvas.width !== w || glCanvas.height !== h) {
+    glCanvas.width = w;
+    glCanvas.height = h;
+  }
+  R.w = w; R.h = h;
+}
+
+// メッシュ（位置・法線・色をまとめた頂点配列）
+function makeMesh(geo) {
+  const n = geo.pos.length / 3;
+  const data = new Float32Array(n * 9);
+  for (let i = 0; i < n; i++) {
+    data.set(geo.pos.slice(i * 3, i * 3 + 3), i * 9);
+    data.set(geo.nor.slice(i * 3, i * 3 + 3), i * 9 + 3);
+    data.set(geo.col.slice(i * 3, i * 3 + 3), i * 9 + 6);
+  }
+  if (!gl) return { count: n };
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 36, 0);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 36, 12);
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 36, 24);
+  gl.bindVertexArray(null);
+  return { vao, count: n };
+}
+
+const WHITE = [1, 1, 1];
+// メッシュを1つ描く。opt: tint, emit, alpha
+function drawMesh(mesh, m, tint = WHITE, emit = 0, alpha = 1) {
+  if (!gl || !mesh || !mesh.count) return;
+  gl.uniformMatrix4fv(R.u.uM, false, m);
+  gl.uniformMatrix3fv(R.u.uN, false, M4.normal3(m, R.tmpN));
+  gl.uniform3fv(R.u.uTint, tint);
+  gl.uniform1f(R.u.uEmit, emit);
+  gl.uniform1f(R.u.uAlpha, alpha);
+  gl.bindVertexArray(mesh.vao);
+  gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
+  R.drawCalls++;
+}
+
+function beginFrame(eye, target, fovy) {
+  resizeGL();
+  gl.viewport(0, 0, R.w, R.h);
+  gl.clearColor(R.fogCol[0], R.fogCol[1], R.fogCol[2], 1);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  const proj = M4.persp(fovy, R.w / R.h, 0.1, 400);
+  R.view = M4.lookAt(eye, target, [0, 1, 0]);
+  R.vp = M4.mul(proj, R.view);
+  R.cam = eye;
+  R.drawCalls = 0;
+  gl.useProgram(R.prog);
+  gl.uniformMatrix4fv(R.u.uVP, false, R.vp);
+  gl.uniform3fv(R.u.uLight, R.light);
+  gl.uniform3fv(R.u.uCam, eye);
+  gl.uniform3fv(R.u.uFogCol, R.fogCol);
+  gl.uniform2fv(R.u.uFog, R.fog);
+  gl.disable(gl.BLEND);
+  gl.depthMask(true);
+}
+
+function setBlend(on) {
+  if (on) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+  } else {
+    gl.disable(gl.BLEND);
+    gl.depthMask(true);
+  }
+}
+
+// ワールド座標→画面座標（CSSピクセル）。後ろ側なら null
+function project(p) {
+  const m = R.vp;
+  const x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
+  const y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
+  const w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15];
+  if (w <= 0.01) return null;
+  return [((x / w) * 0.5 + 0.5) * (R.w / R.dpr), (0.5 - (y / w) * 0.5) * (R.h / R.dpr)];
+}
+
+// ===== 20_geo.js =====
+// 形状づくり（箱・円柱・球などを組み合わせて1つのメッシュにまとめる）
+// 色は [r,g,b] か、{top, side, bottom} か、関数 (ローカル位置, 法線) => [r,g,b]
+class Geo {
+  constructor(jit = 0) { this.pos = []; this.nor = []; this.col = []; this.jit = jit; }
+
+  _tri(m, nm, a, b, c, na, nb, nc, ca, cb, cc) {
+    for (const [p, n, k] of [[a, na, ca], [b, nb, cb], [c, nc, cc]]) {
+      const w = M4.xform(m, p);
+      this.pos.push(w[0], w[1], w[2]);
+      const nx = nm[0] * n[0] + nm[3] * n[1] + nm[6] * n[2];
+      const ny = nm[1] * n[0] + nm[4] * n[1] + nm[7] * n[2];
+      const nz = nm[2] * n[0] + nm[5] * n[1] + nm[8] * n[2];
+      const l = Math.hypot(nx, ny, nz) || 1;
+      this.nor.push(nx / l, ny / l, nz / l);
+      if (this.jit) {
+        // 位置に応じて色を少しゆらす（のっぺり感を減らす）
+        const hsh = Math.sin(w[0] * 12.9898 + w[1] * 78.233 + w[2] * 37.719) * 43758.5453;
+        const j = 1 + (hsh - Math.floor(hsh) - 0.5) * this.jit;
+        this.col.push(k[0] * j, k[1] * j, k[2] * j);
+      } else this.col.push(k[0], k[1], k[2]);
+    }
   }
 
-  function startRun() {
-    reset();
-    S.mode = 'run';
+  static pick(color, p, n) {
+    if (typeof color === 'function') return color(p, n);
+    if (Array.isArray(color)) return color;
+    if (n[1] > 0.5) return color.top || color.side;
+    if (n[1] < -0.5) return color.bottom || color.side;
+    return color.side;
   }
 
-  function gameOver() {
-    S.mode = 'over';
-    S.overAt = S.t;
-    const d = Math.floor(S.dist);
-    if (d > S.best) {
-      S.best = d;
-      localStorage.setItem('chari-run-best', String(d));
-    }
-  }
-
-  // ---------- 入力 ----------
-  function press(e) {
-    if (e) e.preventDefault();
-    if (S.mode === 'title') { startRun(); return; }
-    if (S.mode === 'over') {
-      if (S.t - S.overAt > 0.6) startRun();
-      return;
-    }
-    if (S.grounded) S.charging = true;
-  }
-
-  function release(e) {
-    if (e) e.preventDefault();
-    if (S.mode === 'run' && S.charging && S.grounded) {
-      S.vy = -(620 + 680 * S.charge);
-      S.grounded = false;
-    }
-    S.charging = false;
-    S.charge = 0;
-  }
-
-  cv.addEventListener('pointerdown', press);
-  window.addEventListener('pointerup', release);
-  cv.addEventListener('contextmenu', (e) => e.preventDefault());
-  window.addEventListener('keydown', (e) => {
-    if ((e.code === 'Space' || e.code === 'ArrowUp') && !e.repeat) press(e);
-  });
-  window.addEventListener('keyup', (e) => {
-    if (e.code === 'Space' || e.code === 'ArrowUp') release(e);
-  });
-
-  // ---------- 障害物 ----------
-  function spawn() {
-    const r = Math.random();
-    let o;
-    if (r < 0.45) {
-      o = { type: 'box', w: 46 + Math.random() * 26, h: 42 + Math.random() * 36 };
-    } else if (r < 0.75) {
-      o = { type: 'tires', w: 56, h: Math.random() < 0.5 ? 36 : 70 };
-    } else {
-      o = { type: 'car', w: 158 + Math.random() * 24, h: 56 };
-    }
-    o.x = W + 40;
-    S.obstacles.push(o);
-    // 次の出現までは「時間」で間隔を取る（速くなっても詰まりすぎない）
-    S.spawnIn = S.speed * (1.05 + Math.random() * 0.8);
-  }
-
-  // ---------- 更新 ----------
-  function update(dt) {
-    S.t += dt;
-    for (const c of S.clouds) {
-      c.x -= dt * 6;
-      if (c.x < -120) { c.x = W + 60; c.y = 50 + Math.random() * 90; }
-    }
-    if (S.mode === 'title') { S.bgx += dt * 40; return; }
-    if (S.mode === 'over') {
-      if (S.crashRot > -0.5) S.crashRot = Math.max(-0.5, S.crashRot - dt * 2.2);
-      return;
-    }
-
-    // run
-    S.speed = Math.min(780, S.speed + 5 * dt);
-    S.dist += (S.speed * dt) / 48;
-    S.wheel += (S.speed * dt) / 17;
-    S.bgx += S.speed * dt;
-
-    if (S.charging && S.grounded) {
-      S.charge = Math.min(1, S.charge + dt / 0.75);
-    }
-
-    // 重力
-    S.vy += GRAV * dt;
-    S.py += S.vy * dt;
-
-    // 障害物の移動
-    for (const o of S.obstacles) o.x -= S.speed * dt;
-    S.obstacles = S.obstacles.filter((o) => o.x + o.w > -60);
-    S.spawnIn -= S.speed * dt;
-    if (S.spawnIn <= 0) spawn();
-
-    // 接地・衝突判定
-    let surface = GROUND_Y;
-    let crashed = false;
-    for (const o of S.obstacles) {
-      const overlap = PX + 30 > o.x && PX - 34 < o.x + o.w;
-      if (!overlap) continue;
-      const top = GROUND_Y - o.h;
-      if (S.py <= top + 10) {
-        surface = Math.min(surface, top);
+  // 単位立方体（-0.5〜0.5）
+  box(m, color) {
+    const nm = M4.normal3(m);
+    const faces = [
+      [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+      [[-1, 0, 0], [0, 1, 0], [0, 0, -1]],
+      [[0, 1, 0], [0, 0, 1], [1, 0, 0]],
+      [[0, -1, 0], [0, 0, -1], [1, 0, 0]],
+      [[0, 0, 1], [1, 0, 0], [0, 1, 0]],
+      [[0, 0, -1], [-1, 0, 0], [0, 1, 0]],
+    ];
+    for (const [n, u, v] of faces) {
+      const c = (su, sv) => [
+        n[0] * 0.5 + u[0] * su * 0.5 + v[0] * sv * 0.5,
+        n[1] * 0.5 + u[1] * su * 0.5 + v[1] * sv * 0.5,
+        n[2] * 0.5 + u[2] * su * 0.5 + v[2] * sv * 0.5,
+      ];
+      const p00 = c(-1, -1), p10 = c(1, -1), p11 = c(1, 1), p01 = c(-1, 1);
+      // 面の向きをそろえる（外向き反時計回り）
+      const cr = v3.cross(v3.sub(p10, p00), v3.sub(p11, p00));
+      const flip = v3.dot(cr, n) < 0;
+      const k = (p) => Geo.pick(color, p, n);
+      if (!flip) {
+        this._tri(m, nm, p00, p10, p11, n, n, n, k(p00), k(p10), k(p11));
+        this._tri(m, nm, p00, p11, p01, n, n, n, k(p00), k(p11), k(p01));
       } else {
-        crashed = true;
+        this._tri(m, nm, p00, p11, p10, n, n, n, k(p00), k(p11), k(p10));
+        this._tri(m, nm, p00, p01, p11, n, n, n, k(p00), k(p01), k(p11));
       }
     }
-    if (crashed) { gameOver(); return; }
-    if (S.py >= surface) {
-      S.py = surface;
-      S.vy = 0;
-      S.grounded = true;
+    return this;
+  }
+
+  // 円柱（半径1、高さ y=0〜1）。opt.top: 上の半径比（0で円すい）, opt.flat: 角ばった陰影
+  cyl(m, color, seg = 16, opt = {}) {
+    const nm = M4.normal3(m);
+    const rt = opt.top ?? 1, rb = opt.bottom ?? 1;
+    const caps = opt.caps ?? true;
+    const slope = rb - rt; // 側面法線の y 成分
+    for (let i = 0; i < seg; i++) {
+      const a0 = (i / seg) * TAU, a1 = ((i + 1) / seg) * TAU;
+      const c0 = Math.cos(a0), s0 = Math.sin(a0), c1 = Math.cos(a1), s1 = Math.sin(a1);
+      const b0 = [c0 * rb, 0, s0 * rb], b1 = [c1 * rb, 0, s1 * rb];
+      const t0 = [c0 * rt, 1, s0 * rt], t1 = [c1 * rt, 1, s1 * rt];
+      let n0 = v3.norm([c0, slope, s0]), n1 = v3.norm([c1, slope, s1]);
+      if (opt.flat) {
+        const am = (a0 + a1) / 2;
+        n0 = n1 = v3.norm([Math.cos(am), slope, Math.sin(am)]);
+      }
+      const k = (p, n) => Geo.pick(color, p, n);
+      this._tri(m, nm, b0, t1, b1, n0, n1, n1, k(b0, n0), k(t1, n1), k(b1, n1));
+      if (rt > 0) this._tri(m, nm, b0, t0, t1, n0, n0, n1, k(b0, n0), k(t0, n0), k(t1, n1));
+      if (caps) {
+        const up = [0, 1, 0], dn = [0, -1, 0];
+        if (rt > 0) {
+          const ct = [0, 1, 0];
+          this._tri(m, nm, ct, t1, t0, up, up, up, k(ct, up), k(t1, up), k(t0, up));
+        }
+        const cb = [0, 0, 0];
+        this._tri(m, nm, cb, b0, b1, dn, dn, dn, k(cb, dn), k(b0, dn), k(b1, dn));
+      }
+    }
+    return this;
+  }
+
+  // 球（半径1）
+  sphere(m, color, seg = 16, rings = 10, opt = {}) {
+    const nm = M4.normal3(m);
+    const P = (i, j) => {
+      const th = (j / rings) * Math.PI, ph = (i / seg) * TAU;
+      return [Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)];
+    };
+    for (let j = 0; j < rings; j++) {
+      for (let i = 0; i < seg; i++) {
+        const a = P(i, j), b = P(i + 1, j), c = P(i + 1, j + 1), d = P(i, j + 1);
+        let na = a, nb = b, nc = c, nd = d;
+        if (opt.flat) {
+          const f = v3.norm([a[0] + b[0] + c[0] + d[0], a[1] + b[1] + c[1] + d[1], a[2] + b[2] + c[2] + d[2]]);
+          na = nb = nc = nd = f;
+        }
+        const k = (p, n) => Geo.pick(color, p, n);
+        if (j > 0) this._tri(m, nm, a, b, d, na, nb, nd, k(a, na), k(b, nb), k(d, nd));
+        if (j < rings - 1) this._tri(m, nm, b, c, d, nb, nc, nd, k(b, nb), k(c, nc), k(d, nd));
+      }
+    }
+    return this;
+  }
+
+  // 平らな円（上向き、半径1）
+  disc(m, color, seg = 20) {
+    const nm = M4.normal3(m);
+    const up = [0, 1, 0];
+    for (let i = 0; i < seg; i++) {
+      const a0 = (i / seg) * TAU, a1 = ((i + 1) / seg) * TAU;
+      const p0 = [Math.cos(a0), 0, Math.sin(a0)], p1 = [Math.cos(a1), 0, Math.sin(a1)];
+      const c0 = Geo.pick(color, [0, 0, 0], up);
+      this._tri(m, nm, [0, 0, 0], p1, p0, up, up, up, c0, Geo.pick(color, p1, up), Geo.pick(color, p0, up));
+    }
+    return this;
+  }
+
+  // 輪（ドーナツ型、XZ平面）
+  torus(m, color, R0 = 1, r0 = 0.25, seg = 20, tube = 8) {
+    const nm = M4.normal3(m);
+    const P = (i, j) => {
+      const u = (i / seg) * TAU, v = (j / tube) * TAU;
+      const cx = Math.cos(u), cz = Math.sin(u);
+      const n = [Math.cos(v) * cx, Math.sin(v), Math.cos(v) * cz];
+      return [[cx * R0 + n[0] * r0, n[1] * r0, cz * R0 + n[2] * r0], n];
+    };
+    for (let i = 0; i < seg; i++) {
+      for (let j = 0; j < tube; j++) {
+        const [a, na] = P(i, j), [b, nb] = P(i + 1, j), [c, nc] = P(i + 1, j + 1), [d, nd] = P(i, j + 1);
+        const k = (p, n) => Geo.pick(color, p, n);
+        this._tri(m, nm, a, d, b, na, nd, nb, k(a, na), k(d, nd), k(b, nb));
+        this._tri(m, nm, b, d, c, nb, nd, nc, k(b, nb), k(d, nd), k(c, nc));
+      }
+    }
+    return this;
+  }
+
+  mesh() { return makeMesh(this); }
+}
+
+// 行列を手早く作るための小道具
+function T(x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1, ry = 0, rx = 0, rz = 0) {
+  const m = M4.ident();
+  M4.translate(m, x, y, z);
+  if (ry) M4.rotY(m, ry);
+  if (rx) M4.rotX(m, rx);
+  if (rz) M4.rotZ(m, rz);
+  M4.scale(m, sx, sy, sz);
+  return m;
+}
+
+// 色ユーティリティ
+const hex = (h) => [((h >> 16) & 255) / 255, ((h >> 8) & 255) / 255, (h & 255) / 255];
+const mixc = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+const shade = (c, k) => [c[0] * k, c[1] * k, c[2] * k];
+
+// ===== 30_input.js =====
+// 入力（キーボード・タッチ・マウス・ゲームパッド）
+const hudCanvas = document.getElementById('hud');
+
+const Input = {
+  mx: 0, my: 0,          // 移動（-1〜1、my>0 が奥）
+  jump: false, jumpP: false,
+  attackP: false,
+  crouch: false, crouchP: false,
+  camDX: 0, camDY: 0,    // カメラ回転量（このフレーム分）
+  camKey: 0,             // Q/E 長押しによる回転
+  zoomP: false,
+  pauseP: false,
+  anyP: false,           // 何かのボタンが押された（タイトル用）
+  touchMode: false,
+  keys: new Set(),
+  // タッチ
+  stick: null,           // {id, ox, oy, x, y}
+  camTouch: null,        // {id, x, y}
+  btns: {},              // name -> {x,y,r, id, down}
+  pad: { jump: false, attack: false, crouch: false },
+};
+
+const KEYMAP = {
+  jump: ['Space', 'KeyK', 'KeyZ'],
+  attack: ['KeyJ', 'KeyX'],
+  crouch: ['ShiftLeft', 'ShiftRight', 'KeyL', 'KeyC'],
+};
+
+window.addEventListener('keydown', (e) => {
+  if (e.repeat) { if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault(); return; }
+  Input.keys.add(e.code);
+  Input.touchMode = false;
+  if (KEYMAP.jump.includes(e.code)) Input.jumpP = true;
+  if (KEYMAP.attack.includes(e.code)) Input.attackP = true;
+  if (KEYMAP.crouch.includes(e.code)) Input.crouchP = true;
+  if (e.code === 'KeyR') Input.zoomP = true;
+  if (e.code === 'Escape' || e.code === 'KeyP') Input.pauseP = true;
+  if (e.code === 'Enter' || KEYMAP.jump.includes(e.code)) Input.anyP = true;
+  if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+  Sound.unlock();
+});
+window.addEventListener('keyup', (e) => Input.keys.delete(e.code));
+window.addEventListener('blur', () => Input.keys.clear());
+
+// ---- タッチ用ボタン配置（CSSピクセル） ----
+function layoutTouch(w, h) {
+  const s = Math.min(w, h);
+  const r = clamp(s * 0.085, 30, 52);
+  const pad = r * 0.6;
+  Input.btns = {
+    jump: { x: w - pad - r, y: h - pad - r, r: r * 1.15, label: 'ジャンプ' },
+    attack: { x: w - pad - r * 3.3, y: h - pad - r * 0.6, r: r * 0.9, label: 'パンチ' },
+    crouch: { x: w - pad - r * 0.9, y: h - pad - r * 3.4, r: r * 0.85, label: 'しゃがむ' },
+    pause: { x: w - 36, y: 36, r: 22, label: 'Ⅱ' },
+    camera: { x: 36, y: 36, r: 22, label: '◎' },
+  };
+  for (const k in Input.btns) Object.assign(Input.btns[k], { id: null, down: false });
+}
+
+function hitBtn(x, y) {
+  for (const k in Input.btns) {
+    const b = Input.btns[k];
+    if (Math.hypot(x - b.x, y - b.y) < b.r * 1.2) return k;
+  }
+  return null;
+}
+
+function pressBtn(name, down) {
+  if (name === 'jump') { if (down) { Input.jumpP = true; Input.anyP = true; } Input.pad.jump = down; }
+  if (name === 'attack') { if (down) Input.attackP = true; Input.pad.attack = down; }
+  if (name === 'crouch') { if (down) Input.crouchP = true; Input.pad.crouch = down; }
+  if (name === 'pause' && down) Input.pauseP = true;
+  if (name === 'camera' && down) Input.zoomP = true;
+}
+
+hudCanvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  Input.touchMode = true;
+  Sound.unlock();
+  const w = window.innerWidth;
+  for (const t of e.changedTouches) {
+    const x = t.clientX, y = t.clientY;
+    const b = Game.state === 'play' ? hitBtn(x, y) : null;
+    if (b) {
+      Input.btns[b].id = t.identifier;
+      Input.btns[b].down = true;
+      pressBtn(b, true);
+    } else if (x < w * 0.45 && !Input.stick && Game.state === 'play') {
+      Input.stick = { id: t.identifier, ox: x, oy: y, x, y };
+    } else if (!Input.camTouch) {
+      Input.camTouch = { id: t.identifier, x, y, sx: x, sy: y, t: performance.now() };
+      Input.anyP = true;
+    }
+  }
+}, { passive: false });
+
+hudCanvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (Input.stick && t.identifier === Input.stick.id) {
+      Input.stick.x = t.clientX; Input.stick.y = t.clientY;
+    } else if (Input.camTouch && t.identifier === Input.camTouch.id) {
+      Input.camDX += t.clientX - Input.camTouch.x;
+      Input.camDY += t.clientY - Input.camTouch.y;
+      Input.camTouch.x = t.clientX; Input.camTouch.y = t.clientY;
+    }
+  }
+}, { passive: false });
+
+function touchEnd(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (Input.stick && t.identifier === Input.stick.id) Input.stick = null;
+    if (Input.camTouch && t.identifier === Input.camTouch.id) Input.camTouch = null;
+    for (const k in Input.btns) {
+      const b = Input.btns[k];
+      if (b.id === t.identifier) { b.id = null; b.down = false; pressBtn(k, false); }
+    }
+  }
+}
+hudCanvas.addEventListener('touchend', touchEnd, { passive: false });
+hudCanvas.addEventListener('touchcancel', touchEnd, { passive: false });
+
+// マウス：ドラッグでカメラ回転、クリックでタイトル開始
+let mouseDrag = null;
+hudCanvas.addEventListener('mousedown', (e) => {
+  Sound.unlock();
+  mouseDrag = { x: e.clientX, y: e.clientY };
+  Input.anyP = true;
+});
+window.addEventListener('mousemove', (e) => {
+  if (!mouseDrag) return;
+  Input.camDX += e.clientX - mouseDrag.x;
+  Input.camDY += e.clientY - mouseDrag.y;
+  mouseDrag.x = e.clientX; mouseDrag.y = e.clientY;
+});
+window.addEventListener('mouseup', () => { mouseDrag = null; });
+hudCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+let padPrev = {};
+function pollInput() {
+  const k = Input.keys;
+  let x = 0, y = 0;
+  if (k.has('KeyA') || k.has('ArrowLeft')) x -= 1;
+  if (k.has('KeyD') || k.has('ArrowRight')) x += 1;
+  if (k.has('KeyW') || k.has('ArrowUp')) y += 1;
+  if (k.has('KeyS') || k.has('ArrowDown')) y -= 1;
+  if (x && y) { x *= Math.SQRT1_2; y *= Math.SQRT1_2; }
+  Input.camKey = (k.has('KeyE') ? 1 : 0) - (k.has('KeyQ') ? 1 : 0);
+
+  if (Input.stick) {
+    const maxR = 60;
+    let dx = Input.stick.x - Input.stick.ox, dy = Input.stick.y - Input.stick.oy;
+    const d = Math.hypot(dx, dy);
+    if (d > maxR) { // スティックの原点を指に追従させる
+      Input.stick.ox += (dx / d) * (d - maxR);
+      Input.stick.oy += (dy / d) * (d - maxR);
+      dx = Input.stick.x - Input.stick.ox; dy = Input.stick.y - Input.stick.oy;
+    }
+    const m = Math.min(1, d / maxR);
+    if (d > 6) { x = (dx / (d || 1)) * m; y = (-dy / (d || 1)) * m; }
+  }
+
+  let jumpHeld = KEYMAP.jump.some((c) => k.has(c)) || Input.pad.jump;
+  let crouchHeld = KEYMAP.crouch.some((c) => k.has(c)) || Input.pad.crouch;
+
+  // ゲームパッド
+  const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (const gp of gps) {
+    if (!gp) continue;
+    const ax = gp.axes[0] || 0, ay = gp.axes[1] || 0;
+    const am = Math.hypot(ax, ay);
+    if (am > 0.18) { const s = Math.min(1, (am - 0.18) / 0.75) / am; x = ax * s; y = -ay * s; }
+    const cx = gp.axes[2] || 0, cy = gp.axes[3] || 0;
+    if (Math.abs(cx) > 0.2) Input.camDX += cx * 9;
+    if (Math.abs(cy) > 0.2) Input.camDY += cy * 6;
+    const b = (i) => !!(gp.buttons[i] && gp.buttons[i].pressed);
+    const now = { j: b(0), a: b(2) || b(1), c: b(6) || b(7) || b(4), p: b(9), r: b(5) };
+    if (now.j && !padPrev.j) { Input.jumpP = true; Input.anyP = true; }
+    if (now.a && !padPrev.a) Input.attackP = true;
+    if (now.c && !padPrev.c) Input.crouchP = true;
+    if (now.p && !padPrev.p) Input.pauseP = true;
+    if (now.r && !padPrev.r) Input.zoomP = true;
+    jumpHeld = jumpHeld || now.j;
+    crouchHeld = crouchHeld || now.c;
+    padPrev = now;
+    break;
+  }
+
+  Input.mx = x; Input.my = y;
+  Input.jump = jumpHeld;
+  Input.crouch = crouchHeld;
+}
+
+function clearPressed() {
+  Input.jumpP = Input.attackP = Input.crouchP = Input.zoomP = Input.pauseP = Input.anyP = false;
+  Input.camDX = Input.camDY = 0;
+}
+
+// ===== 35_sound.js =====
+// 効果音（WebAudio で合成。外部ファイルは使わない）
+const Sound = {
+  ctx: null,
+  master: null,
+  muted: localStorage.getItem('koron-mute') === '1',
+  unlock() {
+    if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    this.ctx = new AC();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = this.muted ? 0 : 0.5;
+    this.master.connect(this.ctx.destination);
+  },
+  setMute(m) {
+    this.muted = m;
+    localStorage.setItem('koron-mute', m ? '1' : '0');
+    if (this.master) this.master.gain.value = m ? 0 : 0.5;
+  },
+  // 音を1つ鳴らす：周波数を f0→f1 に変化
+  tone(f0, f1, dur, type = 'square', vol = 0.2, delay = 0) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime + delay;
+    const o = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(this.master);
+    o.start(t); o.stop(t + dur + 0.02);
+  },
+  noise(dur, vol = 0.2, freq = 800) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const n = Math.floor(this.ctx.sampleRate * dur);
+    const buf = this.ctx.createBuffer(1, n, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    const s = this.ctx.createBufferSource();
+    s.buffer = buf;
+    const f = this.ctx.createBiquadFilter();
+    f.type = 'lowpass'; f.frequency.value = freq;
+    const g = this.ctx.createGain();
+    g.gain.value = vol;
+    s.connect(f); f.connect(g); g.connect(this.master);
+    s.start(t);
+  },
+  play(name) {
+    switch (name) {
+      case 'jump': this.tone(330, 660, 0.14, 'square', 0.12); break;
+      case 'jump2': this.tone(392, 880, 0.16, 'square', 0.12); break;
+      case 'jump3': this.tone(440, 1320, 0.28, 'square', 0.13); this.tone(660, 1760, 0.2, 'triangle', 0.08, 0.06); break;
+      case 'land': this.noise(0.06, 0.12, 500); break;
+      case 'acorn': this.tone(988, 988, 0.06, 'square', 0.1); this.tone(1319, 1319, 0.16, 'square', 0.1, 0.06); break;
+      case 'seed': [523, 659, 784, 1047, 1319].forEach((f, i) => this.tone(f, f, 0.22, 'triangle', 0.16, i * 0.09)); break;
+      case 'hurt': this.tone(400, 90, 0.35, 'sawtooth', 0.14); break;
+      case 'stomp': this.tone(220, 60, 0.15, 'square', 0.16); this.noise(0.1, 0.15, 900); break;
+      case 'punch': this.noise(0.08, 0.2, 1500); this.tone(200, 120, 0.08, 'square', 0.08); break;
+      case 'pound': this.noise(0.25, 0.3, 400); this.tone(120, 40, 0.25, 'sine', 0.3); break;
+      case 'wall': this.tone(500, 900, 0.1, 'square', 0.1); break;
+      case 'spring': this.tone(200, 900, 0.3, 'sine', 0.2); break;
+      case 'fall': this.tone(800, 100, 0.8, 'triangle', 0.15); break;
+      case 'heart': this.tone(660, 990, 0.2, 'sine', 0.15); break;
+      case 'select': this.tone(660, 660, 0.08, 'square', 0.08); break;
+      case 'clear': [523, 659, 784, 659, 784, 1047].forEach((f, i) => this.tone(f, f, 0.3, 'triangle', 0.16, i * 0.15)); break;
+    }
+  },
+};
+
+// ===== 40_world.js =====
+// 当たり判定の世界（足場＝箱・坂・円柱）
+// 箱 : {type:'box', x0,y0,z0,x1,y1,z1}
+// 坂 : 箱に ramp:{axis:'x'|'z', a, b}（軸の始点の高さ a → 終点の高さ b、y1 = max(a,b)）
+// 円柱: {type:'cyl', x,z,r,y0,y1}
+// 共通: kind（'grass' 'stone' 'wood' 'ice' 'spring' 'lava'）, dx,dy,dz（このフレームの移動量）
+const World = {
+  solids: [],
+  killY: -40,
+  clear() { this.solids = []; },
+  add(s) {
+    s.dx = s.dy = s.dz = 0;
+    s.kind = s.kind || 'grass';
+    this.solids.push(s);
+    return s;
+  },
+  box(x0, y0, z0, x1, y1, z1, kind) {
+    return this.add({ type: 'box', x0: Math.min(x0, x1), y0: Math.min(y0, y1), z0: Math.min(z0, z1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), z1: Math.max(z0, z1), kind });
+  },
+  // 中心とサイズで箱
+  boxC(cx, cy, cz, sx, sy, sz, kind) {
+    return this.box(cx - sx / 2, cy - sy / 2, cz - sz / 2, cx + sx / 2, cy + sy / 2, cz + sz / 2, kind);
+  },
+  ramp(x0, z0, x1, z1, y0, axis, a, b, kind) {
+    const s = this.box(x0, y0, z0, x1, Math.max(a, b), z1, kind);
+    s.ramp = { axis, a, b };
+    return s;
+  },
+  cyl(x, z, r, y0, y1, kind) {
+    return this.add({ type: 'cyl', x, z, r, y0, y1, kind });
+  },
+  move(s, dx, dy, dz) {
+    if (s.type === 'cyl') { s.x += dx; s.z += dz; } else { s.x0 += dx; s.x1 += dx; s.z0 += dz; s.z1 += dz; }
+    s.y0 += dy; s.y1 += dy;
+    s.dx += dx; s.dy += dy; s.dz += dz;
+  },
+};
+
+// 上面の高さ
+function topAt(s, x, z) {
+  if (!s.ramp) return s.y1;
+  const r = s.ramp;
+  const t = r.axis === 'x' ? (x - s.x0) / (s.x1 - s.x0) : (z - s.z0) / (s.z1 - s.z0);
+  return lerp(r.a, r.b, clamp(t, 0, 1)) + (s.y1 - Math.max(r.a, r.b)); // 動く坂にも対応
+}
+
+// (x,z) が足場の上か（pad だけ外側まで許す）
+function overXZ(s, x, z, pad) {
+  if (s.type === 'cyl') return Math.hypot(x - s.x, z - s.z) <= s.r + pad;
+  return x >= s.x0 - pad && x <= s.x1 + pad && z >= s.z0 - pad && z <= s.z1 + pad;
+}
+
+// 足元の地面を探す：yFrom 以下で一番高い上面。戻り値 {y, s} または null
+function groundBelow(x, z, yFrom, pad = 0) {
+  let best = null;
+  for (const s of World.solids) {
+    if (!overXZ(s, x, z, pad)) continue;
+    let top;
+    if (s.ramp) top = topAt(s, clamp(x, s.x0, s.x1), clamp(z, s.z0, s.z1));
+    else top = s.y1;
+    if (top <= yFrom + 1e-4 && (!best || top > best.y)) best = { y: top, s };
+  }
+  return best;
+}
+
+// 頭上の天井
+function ceilingAbove(x, z, yHead, yHeadNew, pad) {
+  let best = null;
+  for (const s of World.solids) {
+    if (!overXZ(s, x, z, -pad)) continue;
+    if (s.y0 >= yHead - 1e-3 && s.y0 < yHeadNew && (!best || s.y0 < best)) best = s.y0;
+  }
+  return best;
+}
+
+// 横方向の押し戻し。p:{x,y,z,r,h}。戻り値：一番強く当たった壁 {nx,nz,s} または null
+const STEP_H = 0.45;
+function pushOutXZ(p) {
+  let wall = null, wallPush = 0;
+  for (let iter = 0; iter < 2; iter++) {
+    for (const s of World.solids) {
+      if (p.y + p.h <= s.y0 + 0.02) continue;
+      let cx, cz;
+      if (s.type === 'cyl') {
+        const dx = p.x - s.x, dz = p.z - s.z;
+        const d = Math.hypot(dx, dz);
+        if (d >= s.r + p.r) continue;
+        if (p.y >= s.y1 - STEP_H) continue;
+        const nx = d > 1e-6 ? dx / d : 1, nz = d > 1e-6 ? dz / d : 0;
+        const push = s.r + p.r - d;
+        p.x += nx * push; p.z += nz * push;
+        if (push > wallPush) { wallPush = push; wall = { nx, nz, s }; }
+        continue;
+      }
+      cx = clamp(p.x, s.x0, s.x1); cz = clamp(p.z, s.z0, s.z1);
+      const top = s.ramp ? topAt(s, cx, cz) : s.y1;
+      if (p.y >= top - STEP_H) continue;
+      if (s.ramp && p.y + p.h <= s.y0) continue;
+      let dx = p.x - cx, dz = p.z - cz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 >= p.r * p.r) continue;
+      let nx, nz, push;
+      if (d2 > 1e-10) {
+        const d = Math.sqrt(d2);
+        nx = dx / d; nz = dz / d; push = p.r - d;
+      } else {
+        // 中心が箱の中：一番近い辺へ出す
+        const l = p.x - s.x0, r = s.x1 - p.x, b = p.z - s.z0, f = s.z1 - p.z;
+        const m = Math.min(l, r, b, f);
+        if (m === l) { nx = -1; nz = 0; } else if (m === r) { nx = 1; nz = 0; } else if (m === b) { nx = 0; nz = -1; } else { nx = 0; nz = 1; }
+        push = m + p.r;
+      }
+      p.x += nx * push; p.z += nz * push;
+      if (push > wallPush) { wallPush = push; wall = { nx, nz, s }; }
+    }
+  }
+  return wall;
+}
+
+// 線分とワールドの交差（カメラのめり込み防止用）。戻り値 t（0〜1）
+function raycast(a, b) {
+  let tMin = 1;
+  const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  for (const s of World.solids) {
+    if (s.noCam) continue;
+    let x0, x1, z0, z1;
+    if (s.type === 'cyl') { x0 = s.x - s.r * 0.8; x1 = s.x + s.r * 0.8; z0 = s.z - s.r * 0.8; z1 = s.z + s.r * 0.8; }
+    else { x0 = s.x0; x1 = s.x1; z0 = s.z0; z1 = s.z1; }
+    const lo = [x0, s.y0, z0], hi = [x1, s.ramp ? (s.y0 + s.y1) / 2 : s.y1, z1];
+    let t0 = 0, t1 = tMin, hit = true;
+    for (let i = 0; i < 3; i++) {
+      if (Math.abs(d[i]) < 1e-9) {
+        if (a[i] < lo[i] || a[i] > hi[i]) { hit = false; break; }
+      } else {
+        let ta = (lo[i] - a[i]) / d[i], tb = (hi[i] - a[i]) / d[i];
+        if (ta > tb) [ta, tb] = [tb, ta];
+        t0 = Math.max(t0, ta); t1 = Math.min(t1, tb);
+        if (t0 > t1) { hit = false; break; }
+      }
+    }
+    if (hit && t0 > 0 && t0 < tMin) tMin = t0;
+  }
+  return tMin;
+}
+
+// ===== 50_player.js =====
+// 主人公「ころん」の動きと当たり判定
+const PL = {
+  R: 0.42, H: 1.3,
+  GRAV: 40, MAXFALL: 34,
+  WALK: 4.2, RUN: 9.2, ACC: 34, DEC: 30, AIR_ACC: 16,
+  TURN: 12,
+  J1: 13.2, J2: 15.6, J3: 19.5,
+  CHAIN_WIN: 0.2,
+};
+
+const P = {
+  x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0,
+  r: PL.R, h: PL.H,
+  yaw: 0,            // 向き（+z 方向が 0、反時計回り）
+  speed: 0,          // 水平方向の速さ
+  grounded: true, groundS: null,
+  state: 'ground',   // ground | air | pound | punch | hurt | dead | win
+  jumpN: 0,          // 連続ジャンプの段数
+  landT: 0,          // 着地してからの時間
+  airT: 0,
+  jumpHeld: false,
+  stateT: 0,
+  flip: 0,           // 三段ジャンプ・バク宙の回転
+  flipDir: 1,
+  wall: null, wallT: 0,
+  hp: 3, maxHp: 3,
+  inv: 0,            // 無敵時間
+  safe: [0, 0, 0],   // 最後に安全に立った位置
+  safeT: 0,
+  anim: 0,           // 歩きアニメの位相
+  squash: 1,
+  crouching: false,
+  punchHit: false,
+  longJump: false,
+  dust: 0,
+};
+
+function playerReset(x, y, z, yaw) {
+  Object.assign(P, {
+    x, y, z, vx: 0, vy: 0, vz: 0, yaw, speed: 0, grounded: true, groundS: null, state: 'ground',
+    jumpN: 0, landT: 1, airT: 0, flip: 0, wall: null, wallT: 0, inv: 0, stateT: 0, squash: 1,
+    crouching: false, longJump: false,
+  });
+  P.safe = [x, y, z];
+}
+
+function playerHurt(fromX, fromZ, dmg = 1) {
+  if (P.inv > 0 || P.state === 'dead' || P.state === 'win') return;
+  P.hp -= dmg;
+  Sound.play('hurt');
+  Fx.burst(P.x, P.y + 0.8, P.z, [1, 0.9, 0.4], 10, 5);
+  Game.shake = 0.35;
+  if (P.hp <= 0) { playerDie(); return; }
+  const dx = P.x - fromX, dz = P.z - fromZ, d = Math.hypot(dx, dz) || 1;
+  P.vx = (dx / d) * 8; P.vz = (dz / d) * 8; P.vy = 9;
+  P.grounded = false;
+  P.state = 'hurt'; P.stateT = 0;
+  P.inv = 2.0;
+}
+
+function playerDie() {
+  P.hp = 0;
+  P.state = 'dead'; P.stateT = 0;
+  P.vx = P.vz = 0; P.vy = 12;
+  Game.onDeath();
+}
+
+// 入力方向（カメラ基準）→ ワールド方向
+function inputDir() {
+  const m = Math.min(1, Math.hypot(Input.mx, Input.my));
+  if (m < 0.05) return { m: 0, ax: 0, az: 0 };
+  const cy = Cam.yaw;
+  // カメラの前（奥）方向 = (-sin, -cos)（カメラは yaw 方向の後ろにいる）
+  const fx = -Math.sin(cy), fz = -Math.cos(cy);
+  const rx = -fz, rz = fx;
+  let ax = fx * Input.my - rx * Input.mx;
+  let az = fz * Input.my - rz * Input.mx;
+  const l = Math.hypot(ax, az) || 1;
+  return { m, ax: ax / l, az: az / l };
+}
+
+function doJump(vy, name) {
+  P.vy = vy;
+  P.grounded = false;
+  P.groundS = null;
+  P.state = 'air';
+  P.airT = 0;
+  P.jumpHeld = true;
+  P.squash = 1.35;
+  Sound.play(name);
+  Fx.dust(P.x, P.y, P.z, 6);
+}
+
+function updatePlayer(dt) {
+  P.stateT += dt;
+  P.inv = Math.max(0, P.inv - dt);
+  P.squash = lerp(P.squash, 1, 1 - Math.exp(-dt * 12));
+
+  if (P.state === 'dead') {
+    P.vy -= PL.GRAV * 0.6 * dt;
+    P.y += P.vy * dt;
+    P.flip += dt * 6;
+    return;
+  }
+  if (P.state === 'win') {
+    P.vx = P.vz = 0;
+    P.anim += dt * 6;
+    return;
+  }
+
+  const inp = inputDir();
+  const onGround = P.grounded;
+
+  // 動く足場に乗っていたら一緒に動く
+  if (onGround && P.groundS) {
+    P.x += P.groundS.dx; P.y += P.groundS.dy; P.z += P.groundS.dz;
+    if (P.groundS.rotY) {
+      const s = P.groundS, c = Math.cos(s.rotY), sn = Math.sin(s.rotY);
+      const rx = P.x - s.cx, rz = P.z - s.cz;
+      P.x = s.cx + rx * c + rz * sn; P.z = s.cz - rx * sn + rz * c;
+      P.yaw -= s.rotY;
+    }
+  }
+
+  P.crouching = onGround && Input.crouch && (P.state === 'ground');
+
+  // ---------- 地上 ----------
+  if (P.state === 'ground') {
+    P.landT += dt;
+    const ice = P.groundS && P.groundS.kind === 'ice';
+    let target = 0;
+    if (inp.m > 0) {
+      target = P.crouching ? PL.WALK * 0.35 * inp.m : lerp(PL.WALK * 0.5, PL.RUN, smooth(inp.m)) * (inp.m > 0.15 ? 1 : 0.4);
+      const want = Math.atan2(inp.ax, inp.az);
+      const diff = angDiff(P.yaw, want);
+      // 急な切り返しはその場で向きを変える（減速）
+      if (Math.abs(diff) > 2.6 && P.speed > 5) {
+        P.speed = approach(P.speed, 0, PL.DEC * 2 * dt);
+        if (P.speed < 2) P.yaw = want;
+        Fx.skid(P.x, P.y, P.z);
+      } else {
+        const turn = PL.TURN * (ice ? 0.35 : 1) * dt * (P.speed > 7 ? 0.7 : 1);
+        P.yaw += clamp(diff, -turn, turn);
+        P.speed = approach(P.speed, target, (target > P.speed ? PL.ACC : PL.DEC) * (ice ? 0.25 : 1) * dt);
+      }
     } else {
-      S.grounded = false;
+      P.speed = approach(P.speed, 0, PL.DEC * (ice ? 0.15 : 1) * dt);
     }
-  }
+    P.vx = Math.sin(P.yaw) * P.speed;
+    P.vz = Math.cos(P.yaw) * P.speed;
+    P.anim += dt * (2 + P.speed * 1.5);
+    if (P.speed > 7 && Math.random() < dt * 10) Fx.dust(P.x, P.y, P.z, 1);
 
-  // ---------- 描画 ----------
-  function rr(x, y, w, h, r) {
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, r);
-  }
-
-  function drawBackground() {
-    const g = ctx.createLinearGradient(0, 0, 0, H);
-    g.addColorStop(0, '#8fd4ff');
-    g.addColorStop(0.75, '#dff6ff');
-    g.addColorStop(1, '#eafbf0');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W, H);
-
-    // 太陽
-    ctx.fillStyle = '#ffd94d';
-    ctx.beginPath(); ctx.arc(862, 68, 30, 0, Math.PI * 2); ctx.fill();
-
-    // 雲
-    ctx.fillStyle = 'rgba(255,255,255,.92)';
-    for (const c of S.clouds) {
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, 22 * c.s, 0, Math.PI * 2);
-      ctx.arc(c.x + 24 * c.s, c.y + 4 * c.s, 17 * c.s, 0, Math.PI * 2);
-      ctx.arc(c.x - 25 * c.s, c.y + 5 * c.s, 15 * c.s, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // 遠くの建物（パララックス）
-    const heights = [120, 175, 140, 205, 155, 185];
-    const off = (S.bgx * 0.25) % 190;
-    ctx.fillStyle = '#b7d3e8';
-    for (let i = -1; i < 7; i++) {
-      const bx = i * 190 - off;
-      const bh = heights[((i % heights.length) + heights.length) % heights.length];
-      ctx.fillRect(bx, GROUND_Y - bh, 150, bh);
-    }
-
-    // 地面
-    ctx.fillStyle = '#8f959c';
-    ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
-    ctx.fillStyle = '#69b84d';
-    ctx.fillRect(0, GROUND_Y, W, 7);
-    // 白線
-    ctx.fillStyle = 'rgba(255,255,255,.75)';
-    const dashOff = S.bgx % 84;
-    for (let x = -84; x < W + 84; x += 84) {
-      ctx.fillRect(x - dashOff, GROUND_Y + 46, 44, 6);
-    }
-  }
-
-  function drawObstacle(o) {
-    const top = GROUND_Y - o.h;
-    if (o.type === 'box') {
-      ctx.fillStyle = '#d9a066';
-      ctx.strokeStyle = '#a9743a';
-      ctx.lineWidth = 3;
-      ctx.fillRect(o.x, top, o.w, o.h);
-      ctx.strokeRect(o.x, top, o.w, o.h);
-      ctx.beginPath();
-      ctx.moveTo(o.x, top); ctx.lineTo(o.x + o.w, top + o.h);
-      ctx.moveTo(o.x + o.w, top); ctx.lineTo(o.x, top + o.h);
-      ctx.stroke();
-    } else if (o.type === 'tires') {
-      const n = o.h > 50 ? 2 : 1;
-      for (let i = 0; i < n; i++) {
-        const cy = GROUND_Y - 18 - i * 34;
-        ctx.fillStyle = '#2f3337';
-        ctx.beginPath(); ctx.arc(o.x + o.w / 2, cy, 18, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#7d838a';
-        ctx.beginPath(); ctx.arc(o.x + o.w / 2, cy, 8, 0, Math.PI * 2); ctx.fill();
+    if (Input.jumpP) {
+      if (P.crouching && P.speed > 4.5) {
+        // 幅とび
+        P.speed = Math.max(P.speed, 8) * 1.75;
+        P.vx = Math.sin(P.yaw) * P.speed; P.vz = Math.cos(P.yaw) * P.speed;
+        doJump(10.5, 'jump2');
+        P.longJump = true;
+        P.jumpN = 0;
+      } else if (P.crouching) {
+        // バク宙
+        P.speed = -4;
+        P.vx = Math.sin(P.yaw) * P.speed; P.vz = Math.cos(P.yaw) * P.speed;
+        doJump(20.5, 'jump3');
+        P.flip = 0.001; P.flipDir = -1;
+        P.jumpN = 0;
+      } else {
+        const chain = P.landT < PL.CHAIN_WIN && P.speed > 3;
+        P.jumpN = chain ? Math.min(P.jumpN + 1, 3) : 1;
+        if (P.jumpN === 3 && P.speed < 6) P.jumpN = 1;
+        const vy = [0, PL.J1, PL.J2, PL.J3][P.jumpN] + P.speed * 0.12;
+        doJump(vy, ['', 'jump', 'jump2', 'jump3'][P.jumpN]);
+        if (P.jumpN === 3) { P.flip = 0.001; P.flipDir = 1; }
       }
-    } else { // car
-      ctx.fillStyle = '#4a90d9';
-      rr(o.x, top + 16, o.w, 40, 9); ctx.fill();
-      rr(o.x + o.w * 0.22, top, o.w * 0.46, 26, 8); ctx.fill();
-      ctx.fillStyle = '#cfeaff';
-      rr(o.x + o.w * 0.27, top + 5, o.w * 0.16, 16, 4); ctx.fill();
-      rr(o.x + o.w * 0.47, top + 5, o.w * 0.16, 16, 4); ctx.fill();
-      ctx.fillStyle = '#24282c';
-      for (const wx of [o.x + 26, o.x + o.w - 26]) {
-        ctx.beginPath(); ctx.arc(wx, GROUND_Y - 2, 13, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#9aa1a8';
-        ctx.beginPath(); ctx.arc(wx, GROUND_Y - 2, 5, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#24282c';
+    } else if (Input.attackP) {
+      P.state = 'punch'; P.stateT = 0; P.punchHit = false;
+      Sound.play('punch');
+      if (P.speed > 5) P.speed += 2;
+    }
+  }
+  // ---------- パンチ ----------
+  else if (P.state === 'punch') {
+    P.speed = approach(P.speed, 0, 14 * dt);
+    P.vx = Math.sin(P.yaw) * P.speed; P.vz = Math.cos(P.yaw) * P.speed;
+    if (P.stateT > 0.32) P.state = 'ground';
+    if (Input.jumpP && P.grounded) { P.state = 'ground'; doJump(PL.J1, 'jump'); P.jumpN = 1; }
+  }
+  // ---------- 空中 ----------
+  else if (P.state === 'air' || P.state === 'hurt') {
+    P.airT += dt;
+    if (P.state === 'air') {
+      // 空中での制御（向きは少しだけ変わる）
+      if (inp.m > 0 && !P.longJump) {
+        const fwd = Math.sin(P.yaw) * inp.ax + Math.cos(P.yaw) * inp.az;
+        const side = Math.cos(P.yaw) * inp.ax - Math.sin(P.yaw) * inp.az;
+        P.speed = approach(P.speed, PL.RUN * Math.max(0.35, fwd) * inp.m, PL.AIR_ACC * dt * (fwd < 0 ? 1.6 : 1));
+        P.yaw += side * dt * 2.2 * (P.flip ? 0.3 : 1);
+      } else if (inp.m > 0 && P.longJump) {
+        const side = Math.cos(P.yaw) * inp.ax - Math.sin(P.yaw) * inp.az;
+        P.yaw += side * dt * 1.2;
+      }
+      P.vx = Math.sin(P.yaw) * P.speed;
+      P.vz = Math.cos(P.yaw) * P.speed;
+      // ジャンプボタンを早く離すと低く
+      if (!Input.jump) P.jumpHeld = false;
+      if (!P.jumpHeld && P.vy > 4 && !P.flip) P.vy -= PL.GRAV * 1.2 * dt;
+      // 壁キック
+      if (P.wall && P.wallT < 0.16 && Input.jumpP && P.airT > 0.05) {
+        const w = P.wall;
+        P.yaw = Math.atan2(w.nx, w.nz);
+        P.speed = 8.5;
+        P.vx = w.nx * 8.5; P.vz = w.nz * 8.5;
+        doJump(15.5, 'wall');
+        P.jumpN = 0; P.longJump = false; P.flip = 0;
+        Fx.burst(P.x - w.nx * 0.4, P.y + 0.9, P.z - w.nz * 0.4, [1, 1, 1], 6, 3);
+        P.wall = null;
+      } else if (Input.crouchP) {
+        // ヒップドロップ
+        P.state = 'pound'; P.stateT = 0;
+        P.vx = P.vz = 0; P.speed = 0; P.vy = 0; P.flip = 0;
+        P.longJump = false;
+      } else if (Input.attackP && P.airT > 0.05 && !P.longJump) {
+        // 空中キック（少し浮く）
+        P.vy = Math.max(P.vy, 4);
+        P.punchHit = false;
+        P.kickT = 0.3;
+        Sound.play('punch');
       }
     }
+    if (P.flip) P.flip += dt * 9.5 * P.flipDir;
+    P.vy = Math.max(P.vy - PL.GRAV * dt, -PL.MAXFALL);
+  }
+  // ---------- ヒップドロップ ----------
+  else if (P.state === 'pound') {
+    if (P.stateT < 0.22) { P.vy = 0; P.flip = (P.stateT / 0.22) * TAU; }
+    else { P.flip = 0; P.vy = -32; }
   }
 
-  function drawPlayer() {
-    ctx.save();
-    ctx.translate(PX, S.py);
-    if (S.mode === 'over') ctx.rotate(S.crashRot);
+  P.kickT = Math.max(0, (P.kickT || 0) - dt);
 
-    const wheelR = 17;
-    const rear = { x: -30, y: -wheelR };
-    const front = { x: 32, y: -wheelR };
-    const crank = { x: 0, y: -34 };
-    const seat = { x: -9, y: -54 };
-    const handle = { x: 24, y: -56 };
+  moveAndCollide(dt);
 
-    // 車輪
-    for (const wpos of [rear, front]) {
-      ctx.strokeStyle = '#22252a';
-      ctx.lineWidth = 4;
-      ctx.beginPath(); ctx.arc(wpos.x, wpos.y, wheelR, 0, Math.PI * 2); ctx.stroke();
-      ctx.lineWidth = 2;
+  // 安全な位置を記録（落下したときの復帰用）
+  if (P.grounded && P.groundS && !P.groundS.dx && !P.groundS.dz && !P.groundS.dy && P.groundS.kind !== 'lava' && !P.groundS.noSafe) {
+    P.safeT += dt;
+    if (P.safeT > 0.3) P.safe = [P.x, P.y, P.z];
+  } else P.safeT = 0;
+
+  if (P.y < World.killY) Game.onFall();
+}
+
+function moveAndCollide(dt) {
+  const prevY = P.y;
+  const steps = 3;
+  const h = dt / steps;
+  let wall = null;
+  for (let i = 0; i < steps; i++) {
+    P.x += P.vx * h;
+    P.z += P.vz * h;
+    const w = pushOutXZ(P);
+    if (w) wall = w;
+  }
+  // 壁に当たったら速度を壁沿いに
+  if (wall) {
+    const vn = P.vx * wall.nx + P.vz * wall.nz;
+    if (vn < 0) {
+      if (P.state === 'ground' && P.speed > 6 && vn < -6 && Math.abs(vn) > P.speed * 0.85) {
+        // 走って壁に正面衝突：はね返る
+        P.speed = -3; Sound.play('land'); Game.shake = 0.12;
+      }
+      P.vx -= vn * wall.nx; P.vz -= vn * wall.nz;
+      if (P.state !== 'ground') {
+        const along = Math.hypot(P.vx, P.vz);
+        if (P.state === 'air') P.speed = Math.min(P.speed, along + 1);
+      }
+    }
+    if (!P.grounded && (P.state === 'air') && P.vy < 6) { P.wall = wall; P.wallT = 0; }
+  }
+  if (P.wall) { P.wallT += dt; if (P.wallT > 0.2) P.wall = null; }
+
+  // 縦方向
+  if (P.grounded) {
+    const g = groundBelow(P.x, P.z, P.y + STEP_H, P.r * 0.5);
+    if (g && P.y - g.y <= 0.5 && P.vy <= 0) {
+      P.y = g.y; P.groundS = g.s; P.vy = 0;
+    } else {
+      P.grounded = false; P.groundS = null;
+      if (P.state === 'ground' || P.state === 'punch') { P.state = 'air'; P.airT = 0; P.jumpHeld = false; }
+      P.vy = Math.max(P.vy, 0) * 0 + Math.min(P.vy, 0);
+    }
+  } else {
+    const ny = P.y + P.vy * dt;
+    if (P.vy > 0) {
+      const c = ceilingAbove(P.x, P.z, P.y + P.h, ny + P.h, P.r * 0.3);
+      if (c !== null) { P.y = c - P.h; P.vy = -1; }
+      else P.y = ny;
+    } else {
+      const g = groundBelow(P.x, P.z, prevY + 0.05, P.r * 0.5);
+      if (g && ny <= g.y) { P.y = g.y; landOn(g.s); }
+      else P.y = ny;
+    }
+  }
+}
+
+function landOn(s) {
+  const fallV = P.vy;
+  P.grounded = true; P.groundS = s; P.vy = 0;
+  P.landT = 0; P.flip = 0; P.wall = null;
+  P.squash = 0.7;
+  if (s.kind === 'spring') {
+    P.state = 'air'; P.grounded = false; P.groundS = null;
+    P.vy = 27; P.airT = 0; P.jumpHeld = true; P.flip = 0.001; P.flipDir = 1;
+    s.boing = 1;
+    Sound.play('spring');
+    return;
+  }
+  if (s.kind === 'lava') {
+    playerHurt(P.x + Math.sin(P.yaw), P.z + Math.cos(P.yaw));
+    P.vy = 16; P.grounded = false; P.groundS = null; P.state = 'hurt';
+    return;
+  }
+  if (P.state === 'pound') {
+    Sound.play('pound');
+    Game.shake = 0.3;
+    Fx.ring(P.x, P.y + 0.05, P.z);
+    Fx.dust(P.x, P.y, P.z, 14);
+    Game.onPound(P.x, P.y, P.z);
+    P.state = 'ground'; P.speed = 0; P.landT = 1;
+    P.stateT = -0.15;
+    return;
+  }
+  if (P.longJump) { P.speed *= 0.45; P.longJump = false; }
+  if (P.state === 'hurt') { P.speed = 0; P.vx = P.vz = 0; }
+  if (fallV < -8) { Sound.play('land'); Fx.dust(P.x, P.y, P.z, 5); }
+  if (fallV < -30) Game.shake = 0.15;
+  P.state = 'ground';
+  P.speed = Math.max(0, P.speed);
+}
+
+// ===== 55_camera.js =====
+// カメラ（主人公の後ろを追いかける。ドラッグ・Q/E・右スティックで回せる）
+const Cam = {
+  yaw: Math.PI, pitch: 0.38, dist: 10.5,
+  zoomLv: 1, dists: [7, 10.5, 15],
+  tx: 0, ty: 0, tz: 0,
+  eye: [0, 5, 10],
+  manualT: 9,
+  fov: 0.95,
+  shown: 10.5,
+  override: null,  // 演出用 {eye, target}
+};
+
+function camReset() {
+  Cam.yaw = P.yaw + Math.PI;
+  Cam.tx = P.x; Cam.ty = P.y + 1.2; Cam.tz = P.z;
+  Cam.pitch = 0.38;
+  Cam.shown = Cam.dist;
+  Cam.manualT = 9;
+}
+
+function updateCamera(dt) {
+  if (Input.zoomP) {
+    Cam.zoomLv = (Cam.zoomLv + 1) % 3;
+    Sound.play('select');
+  }
+  Cam.dist = Cam.dists[Cam.zoomLv];
+
+  // 手動操作
+  const sens = Input.touchMode ? 0.008 : 0.006;
+  if (Input.camDX || Input.camDY || Input.camKey) {
+    Cam.yaw -= Input.camDX * sens + Input.camKey * dt * 2.4;
+    Cam.pitch = clamp(Cam.pitch + Input.camDY * sens * 0.8, -0.15, 1.2);
+    Cam.manualT = 0;
+  } else Cam.manualT += dt;
+
+  // 自動で後ろに回り込む（走っている時だけ、ゆっくり）
+  if (Cam.manualT > 1.2 && P.state !== 'dead') {
+    const sp = Math.hypot(P.vx, P.vz);
+    const behind = P.yaw + Math.PI;
+    const d = angDiff(Cam.yaw, behind);
+    // 横向きに走るとカメラがゆっくり回る。正面に向かって走るときはあまり回さない
+    const k = clamp(sp / PL.RUN, 0, 1) * (Math.abs(d) > 2.4 ? 0.15 : 1);
+    Cam.yaw += d * k * dt * 1.4;
+    Cam.pitch = lerp(Cam.pitch, P.grounded ? 0.36 : 0.42, dt * 0.8);
+  }
+
+  // 注視点：上下はゆっくり追従（ジャンプで画面が揺れないように）
+  const ty = P.y + 1.2;
+  Cam.tx = lerp(Cam.tx, P.x, 1 - Math.exp(-dt * 10));
+  Cam.tz = lerp(Cam.tz, P.z, 1 - Math.exp(-dt * 10));
+  const vyRate = P.grounded || P.y < Cam.ty - 3 ? 6 : 2.2;
+  Cam.ty = lerp(Cam.ty, ty, 1 - Math.exp(-dt * vyRate));
+  if (P.state === 'dead') Cam.ty = Math.max(Cam.ty, World.killY + 6);
+
+  // めり込み防止
+  const target = [Cam.tx, Cam.ty, Cam.tz];
+  const cp = Math.cos(Cam.pitch), sp = Math.sin(Cam.pitch);
+  const want = [
+    Cam.tx + Math.sin(Cam.yaw) * cp * Cam.dist,
+    Cam.ty + sp * Cam.dist,
+    Cam.tz + Math.cos(Cam.yaw) * cp * Cam.dist,
+  ];
+  const t = raycast(target, want);
+  const dWant = Cam.dist * Math.max(0.18, t - 0.04);
+  Cam.shown = dWant < Cam.shown ? lerp(Cam.shown, dWant, 1 - Math.exp(-dt * 25)) : lerp(Cam.shown, dWant, 1 - Math.exp(-dt * 3));
+  let eye = [
+    Cam.tx + Math.sin(Cam.yaw) * cp * Cam.shown,
+    Cam.ty + sp * Cam.shown,
+    Cam.tz + Math.cos(Cam.yaw) * cp * Cam.shown,
+  ];
+  let tgt = target;
+  if (Cam.override) { eye = Cam.override.eye; tgt = Cam.override.target; }
+  if (Game.shake > 0) {
+    const s = Game.shake * 0.5;
+    eye = [eye[0] + (Math.random() - 0.5) * s, eye[1] + (Math.random() - 0.5) * s, eye[2] + (Math.random() - 0.5) * s];
+  }
+  Cam.eye = eye;
+  Cam.target = tgt;
+}
+
+// ===== 60_models.js =====
+// モデル（主人公・アイテム・敵・飾り）と、それを描く関数
+const COL = {
+  body: hex(0xffa94d), bodyDk: hex(0xe8862a), belly: hex(0xfff1d6),
+  scarf: hex(0x2bb3a3), scarfDk: hex(0x1d8c80),
+  eye: hex(0x2a1c18), white: [1, 1, 1], cheek: hex(0xff7b8a),
+  foot: hex(0x7a4a2c), hand: hex(0xfff1d6),
+  grass: hex(0x7cc95a), grassDk: hex(0x5aa645), dirt: hex(0xb4825a), dirtDk: hex(0x8f6444),
+  stone: hex(0xb9b3c4), stoneDk: hex(0x8d879a), wood: hex(0xc58b52), woodDk: hex(0x96633a),
+  ice: hex(0xbfe9ff), lava: hex(0xff6a2a),
+  acorn: hex(0xc98a3e), acornCap: hex(0x7a5230),
+  seed: hex(0x9cfff0), seedCore: hex(0xfff7a8),
+  leaf: hex(0x58b85a), leafDk: hex(0x3f9a4c), trunk: hex(0x9a6a42),
+  flowerR: hex(0xff6b8b), flowerY: hex(0xffe066), flowerW: hex(0xffffff),
+  enemy: hex(0x9b7de0), enemyDk: hex(0x6e55b5), spike: hex(0x5b5566), spikeTip: hex(0xeeeeee),
+  heart: hex(0xff4f6d), cloud: hex(0xffffff), water: hex(0x5cc8ff),
+};
+
+const Models = {};
+
+function buildModels() {
+  // ---- ころん本体（足元が原点、前が +z）----
+  {
+    const g = new Geo();
+    const bodyCol = (p, n) => {
+      if (n[2] > 0.55 && p[1] < 0.35) return COL.belly; // おなか
+      return mixc(COL.bodyDk, COL.body, clamp(p[1] * 0.6 + 0.6, 0, 1));
+    };
+    g.sphere(T(0, 0.72, 0, 0.56, 0.6, 0.53), bodyCol, 22, 14);
+    // 耳（丸い耳）
+    for (const sx of [-1, 1]) {
+      g.sphere(T(sx * 0.34, 1.22, -0.05, 0.17, 0.2, 0.1, 0, 0, sx * -0.35), COL.body, 12, 8);
+      g.sphere(T(sx * 0.34, 1.22, 0.0, 0.1, 0.13, 0.06, 0, 0, sx * -0.35), COL.cheek, 10, 6);
+    }
+    // 目
+    for (const sx of [-1, 1]) {
+      g.sphere(T(sx * 0.19, 0.86, 0.45, 0.085, 0.13, 0.06), COL.eye, 10, 8);
+      g.sphere(T(sx * 0.17, 0.91, 0.5, 0.03, 0.04, 0.02), COL.white, 6, 4);
+      g.sphere(T(sx * 0.33, 0.68, 0.42, 0.08, 0.05, 0.03), COL.cheek, 8, 5);
+    }
+    // 鼻
+    g.sphere(T(0, 0.74, 0.53, 0.05, 0.04, 0.04), COL.eye, 8, 5);
+    // マフラー
+    g.torus(T(0, 0.42, 0, 1, 1, 1, 0, 0, 0), (p, n) => (n[1] > 0 ? COL.scarf : COL.scarfDk), 0.5, 0.09, 22, 8);
+    // しっぽ（丸）
+    g.sphere(T(0, 0.38, -0.52, 0.16, 0.16, 0.16), COL.belly, 10, 8);
+    Models.body = g.mesh();
+  }
+  Models.foot = new Geo().sphere(T(0, 0.08, 0.06, 0.15, 0.1, 0.2), COL.foot, 12, 8).mesh();
+  Models.hand = new Geo().sphere(T(0, 0, 0, 0.12, 0.12, 0.12), COL.hand, 10, 8).mesh();
+  Models.scarfTail = new Geo().box(T(0, -0.18, -0.02, 0.16, 0.36, 0.05), COL.scarf).mesh();
+
+  // ---- どんぐり ----
+  {
+    const g = new Geo();
+    g.sphere(T(0, 0, 0, 0.26, 0.32, 0.26), COL.acorn, 14, 10);
+    g.sphere(T(0, 0.17, 0, 0.29, 0.16, 0.29), (p) => (p[1] > 0 ? COL.acornCap : shade(COL.acornCap, 0.8)), 14, 8, { flat: true });
+    g.cyl(T(0, 0.28, 0, 0.04, 0.14, 0.04), COL.acornCap, 6);
+    Models.acorn = g.mesh();
+  }
+  // ---- ひかりの種（大きな結晶）----
+  {
+    const g = new Geo();
+    g.cyl(T(0, 0, 0, 0.55, 0.7, 0.55), COL.seed, 6, { bottom: 0.0, top: 1, flat: true, caps: false });
+    g.cyl(T(0, 0.7, 0, 0.55, 0.7, 0.55), COL.seed, 6, { bottom: 1, top: 0, flat: true, caps: false });
+    g.sphere(T(0, 0.7, 0, 0.22, 0.22, 0.22), COL.seedCore, 8, 6);
+    Models.seed = g.mesh();
+  }
+  // ---- ハート ----
+  {
+    const g = new Geo();
+    g.sphere(T(-0.17, 0.12, 0, 0.22, 0.22, 0.16), COL.heart, 12, 8);
+    g.sphere(T(0.17, 0.12, 0, 0.22, 0.22, 0.16), COL.heart, 12, 8);
+    g.cyl(T(0, -0.32, 0, 0.32, 0.42, 0.16, 0, 0, 0), COL.heart, 4, { bottom: 0, top: 1, flat: true });
+    Models.heart = g.mesh();
+  }
+  // ---- 敵：もこもこ（踏める）----
+  {
+    const g = new Geo();
+    g.sphere(T(0, 0.55, 0, 0.62, 0.55, 0.62), (p) => mixc(COL.enemyDk, COL.enemy, clamp(p[1] + 0.6, 0, 1)), 16, 10, { flat: true });
+    for (const sx of [-1, 1]) {
+      g.box(T(sx * 0.22, 0.72, 0.52, 0.12, 0.2, 0.08, 0, 0, sx * 0.4), COL.white);
+      g.box(T(sx * 0.2, 0.68, 0.56, 0.06, 0.1, 0.04, 0, 0, sx * 0.4), COL.eye);
+      g.box(T(sx * 0.24, 0.9, 0.5, 0.18, 0.05, 0.05, 0, 0, sx * -0.5), COL.eye); // 怒り眉
+    }
+    g.sphere(T(-0.3, 0.1, 0.1, 0.18, 0.1, 0.24), COL.enemyDk, 8, 6);
+    g.sphere(T(0.3, 0.1, 0.1, 0.18, 0.1, 0.24), COL.enemyDk, 8, 6);
+    Models.blob = g.mesh();
+  }
+  // ---- 敵：トゲコロ（踏めない）----
+  {
+    const g = new Geo();
+    g.sphere(T(0, 0, 0, 0.75, 0.75, 0.75), COL.spike, 14, 10, { flat: true });
+    const n = 14;
+    for (let i = 0; i < n; i++) {
+      const th = Math.acos(1 - (2 * (i + 0.5)) / n), ph = i * 2.39996;
+      const m = T(0, 0, 0, 1, 1, 1, ph, 0, th);
+      M4.translate(m, 0, 0.6, 0);
+      M4.scale(m, 0.2, 0.55, 0.2);
+      g.cyl(m, (p) => (p[1] > 0.6 ? COL.spikeTip : COL.spike), 5, { top: 0 });
+    }
+    Models.spiky = g.mesh();
+  }
+  // ---- 影・粒・輪 ----
+  Models.shadow = new Geo().disc(T(), [0, 0, 0], 20).mesh();
+  Models.puff = new Geo().sphere(T(), WHITE, 8, 6, { flat: true }).mesh();
+  Models.ring = new Geo().torus(T(), WHITE, 1, 0.08, 28, 4).mesh();
+  Models.cube = new Geo().box(T(), WHITE).mesh();
+  Models.flag = (() => {
+    const g = new Geo();
+    g.cyl(T(0, 0, 0, 0.08, 3, 0.08), COL.white, 8);
+    g.sphere(T(0, 3.05, 0, 0.16, 0.16, 0.16), COL.flowerY, 8, 6);
+    return g.mesh();
+  })();
+  Models.flagCloth = new Geo().box(T(0.5, 2.6, 0, 1, 0.6, 0.05), COL.scarf).mesh();
+}
+
+// ころんを描く
+function drawPlayer() {
+  if (P.inv > 0 && P.state !== 'dead' && Math.floor(P.inv * 14) % 2 === 0) return;
+  const m = M4.ident();
+  M4.translate(m, P.x, P.y, P.z);
+  M4.rotY(m, P.yaw);
+  // 回転（宙返り・ヒップドロップ）
+  if (P.flip) {
+    M4.translate(m, 0, 0.7, 0);
+    M4.rotX(m, P.flip);
+    M4.translate(m, 0, -0.7, 0);
+  }
+  // 状態ごとの姿勢
+  let lean = 0, bob = 0, sq = P.squash;
+  const walk = P.state === 'ground' && P.speed > 0.3;
+  if (walk) {
+    bob = Math.abs(Math.sin(P.anim)) * 0.08 * clamp(P.speed / 4, 0, 1);
+    lean = clamp(P.speed / PL.RUN, 0, 1) * 0.22;
+  }
+  if (P.longJump) lean = 1.1;
+  if (P.state === 'punch') lean = 0.25;
+  if (P.crouching) sq = Math.min(sq, 0.72);
+  if (P.state === 'dead') { M4.translate(m, 0, 0.7, 0); M4.rotZ(m, P.flip); M4.translate(m, 0, -0.7, 0); }
+  M4.translate(m, 0, bob, 0);
+  M4.rotX(m, lean);
+  const sx = 1 / Math.sqrt(sq);
+  M4.scale(m, sx, sq, sx);
+
+  drawMesh(Models.body, m);
+
+  // 足
+  const ph = P.anim;
+  const air = !P.grounded;
+  for (const side of [-1, 1]) {
+    const f = M4.copy(m);
+    let swing = walk ? Math.sin(ph + (side > 0 ? 0 : Math.PI)) * 0.5 * clamp(P.speed / 5, 0.3, 1) : 0;
+    let lift = walk ? Math.max(0, Math.sin(ph + (side > 0 ? 0 : Math.PI))) * 0.1 : 0;
+    if (air) { swing = side * 0.35; lift = 0.12; }
+    if (P.state === 'pound') { swing = 0; lift = 0.3; }
+    M4.translate(f, side * 0.24, 0.05 + lift, swing * 0.35);
+    M4.rotX(f, -swing * 0.6);
+    drawMesh(Models.foot, f);
+  }
+  // 手
+  for (const side of [-1, 1]) {
+    const hnd = M4.copy(m);
+    let fx = side * 0.6, fy = 0.6, fz = 0.05;
+    if (walk) fz += Math.sin(ph + (side > 0 ? Math.PI : 0)) * 0.22 * clamp(P.speed / 5, 0.3, 1);
+    if (air && P.state !== 'pound') { fy = 0.95; fx = side * 0.66; }
+    if (P.state === 'punch') {
+      const k = Math.sin(clamp(P.stateT / 0.32, 0, 1) * Math.PI);
+      if (side > 0) { fz = 0.1 + k * 0.6; fy = 0.65; fx = 0.3; }
+    }
+    if (P.kickT > 0 && side > 0) { fz = 0.6; fy = 0.4; }
+    if (P.state === 'win') { fy = 1.2 + Math.sin(P.anim) * 0.1; fx = side * 0.55; }
+    M4.translate(hnd, fx, fy, fz);
+    drawMesh(Models.hand, hnd);
+  }
+  // マフラーのしっぽ（なびく）
+  const sp = Math.hypot(P.vx, P.vz);
+  const tail = M4.copy(m);
+  M4.translate(tail, 0.18, 0.42, -0.5);
+  M4.rotX(tail, -clamp(sp / PL.RUN, 0, 1) * 1.1 - (air ? 0.6 : 0) + Math.sin(Game.time * 12) * 0.12);
+  drawMesh(Models.scarfTail, tail);
+}
+
+// 丸い影を地面に落とす
+function drawShadow(x, y, z, r, a = 0.32) {
+  const g = groundBelow(x, z, y + 0.2, 0);
+  if (!g) return;
+  const h = y - g.y;
+  const k = clamp(1 - h / 14, 0.25, 1);
+  const m = T(x, g.y + 0.03, z, r * (0.6 + 0.4 * k), 1, r * (0.6 + 0.4 * k));
+  drawMesh(Models.shadow, m, [0, 0, 0], 1, a * k);
+}
+
+// ---------- 粒子 ----------
+const Fx = {
+  list: [],
+  add(o) { if (this.list.length < 260) this.list.push(o); },
+  dust(x, y, z, n) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * TAU, s = 1 + Math.random() * 2;
+      this.add({ x: x + Math.cos(a) * 0.3, y: y + 0.1, z: z + Math.sin(a) * 0.3, vx: Math.cos(a) * s, vy: 1 + Math.random() * 1.5, vz: Math.sin(a) * s, life: 0.5, max: 0.5, size: 0.18 + Math.random() * 0.12, col: [0.95, 0.92, 0.85], grav: -2, alpha: 0.8 });
+    }
+  },
+  skid(x, y, z) { if (Math.random() < 0.5) this.dust(x, y, z, 1); },
+  burst(x, y, z, col, n, sp) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * TAU, b = Math.random() * Math.PI - Math.PI / 2, s = sp * (0.5 + Math.random() * 0.7);
+      this.add({ x, y, z, vx: Math.cos(a) * Math.cos(b) * s, vy: Math.sin(b) * s + 2, vz: Math.sin(a) * Math.cos(b) * s, life: 0.6, max: 0.6, size: 0.12 + Math.random() * 0.1, col, grav: 10, alpha: 1, emit: 1 });
+    }
+  },
+  sparkle(x, y, z, col) {
+    this.add({ x: x + (Math.random() - 0.5), y: y + (Math.random() - 0.5), z: z + (Math.random() - 0.5), vx: 0, vy: 0.8, vz: 0, life: 0.7, max: 0.7, size: 0.1, col, grav: 0, alpha: 1, emit: 1 });
+  },
+  ring(x, y, z) { this.add({ ring: true, x, y, z, life: 0.4, max: 0.4, size: 0.5, col: [1, 1, 1] }); },
+  update(dt) {
+    for (const p of this.list) {
+      p.life -= dt;
+      if (p.ring) continue;
+      p.vy -= p.grav * dt;
+      p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+    }
+    this.list = this.list.filter((p) => p.life > 0);
+  },
+  draw() {
+    for (const p of this.list) {
+      const k = p.life / p.max;
+      if (p.ring) {
+        const r = p.size + (1 - k) * 3.5;
+        drawMesh(Models.ring, T(p.x, p.y, p.z, r, 1, r), p.col, 1, k * 0.8);
+      } else {
+        const s = p.size * (0.4 + 0.6 * k);
+        drawMesh(Models.puff, T(p.x, p.y, p.z, s, s, s), p.col, p.emit ? 1 : 0.3, p.alpha * Math.min(1, k * 2));
+      }
+    }
+  },
+};
+
+// ===== 70_level.js =====
+// ステージ「そよかぜ空島」：当たり判定と見た目を同時に組み立てる
+const Level = {
+  static: null,     // まとめた地形メッシュ
+  water: null,
+  clouds: [],
+  acorns: [], seeds: [], hearts: [], enemies: [], movers: [], springs: [],
+  start: { x: 0, y: 0, z: 16, yaw: Math.PI },
+  seedTotal: 0, acornTotal: 0,
+  signs: [],
+};
+
+function buildLevel() {
+  World.clear();
+  World.killY = -28;
+  Object.assign(Level, { acorns: [], seeds: [], hearts: [], enemies: [], movers: [], springs: [], signs: [], clouds: [] });
+  const g = new Geo(0.09);
+  const rng = makeRng(20261125);
+
+  // ---------- 部品 ----------
+  const grassCol = (p, n) => (n[1] > 0.5 ? mixc(COL.grassDk, COL.grass, 0.5 + 0.5 * Math.sin(p[0] * 3.1 + p[2] * 2.3)) : p[1] > 0.75 ? COL.grassDk : COL.dirt);
+  const dirtCol = (p) => mixc(COL.dirtDk, COL.dirt, clamp(p[1], 0, 1));
+
+  function island(x, z, r, top, depth = 7) {
+    World.cyl(x, z, r, top - depth * 0.6, top, 'grass');
+    g.cyl(T(x, top - 0.7, z, r, 0.7, r), grassCol, 32);
+    g.cyl(T(x, top - 0.7 - depth, z, r, depth, r), dirtCol, 32, { bottom: 0.18, top: 0.98, caps: false, flat: true });
+  }
+  function block(cx, cy, cz, sx, sy, sz, kind = 'grass') {
+    const s = World.boxC(cx, cy, cz, sx, sy, sz, kind);
+    g.box(T(cx, cy, cz, sx, sy, sz), kindColor(kind, sy));
+    return s;
+  }
+  function kindColor(kind) {
+    if (kind === 'stone') return (p, n) => (n[1] > 0.5 ? COL.stone : mixc(COL.stoneDk, COL.stone, p[1] + 0.5));
+    if (kind === 'wood') return (p, n) => (n[1] > 0.5 ? COL.wood : COL.woodDk);
+    if (kind === 'ice') return (p, n) => (n[1] > 0.5 ? COL.ice : shade(COL.ice, 0.85));
+    return (p, n) => (n[1] > 0.5 ? COL.grass : p[1] > 0.3 ? COL.grassDk : COL.dirt);
+  }
+  function stump(x, z, r, top) {
+    World.cyl(x, z, r, top - 30, top, 'wood');
+    g.cyl(T(x, top - 30, z, r, 30, r), (p, n) => (n[1] > 0.5 ? mixc(COL.wood, hex(0xe9c08a), 0.5) : COL.woodDk), 18, { flat: true });
+    // 年輪
+    g.cyl(T(x, top, z, r * 0.6, 0.02, r * 0.6), shade(COL.wood, 0.9), 18);
+  }
+  function tree(x, y, z, s = 1) {
+    World.cyl(x, z, 0.45 * s, y, y + 3.2 * s, 'wood');
+    g.cyl(T(x, y, z, 0.35 * s, 3.2 * s, 0.35 * s), COL.trunk, 8, { top: 0.7, flat: true });
+    const leaf = (p) => mixc(COL.leafDk, COL.leaf, clamp(p[1] * 0.5 + 0.5, 0, 1));
+    g.sphere(T(x, y + 3.6 * s, z, 1.6 * s, 1.4 * s, 1.6 * s), leaf, 10, 7, { flat: true });
+    g.sphere(T(x + 0.8 * s, y + 3.0 * s, z + 0.4 * s, 1.0 * s, 0.9 * s, 1.0 * s), leaf, 8, 6, { flat: true });
+    g.sphere(T(x - 0.7 * s, y + 3.2 * s, z - 0.5 * s, 1.0 * s, 0.9 * s, 1.0 * s), leaf, 8, 6, { flat: true });
+    // 木の上にも乗れる
+    World.cyl(x, z, 1.3 * s, y + 4.4 * s, y + 4.9 * s, 'grass').noCam = true;
+  }
+  function pine(x, y, z, s = 1) {
+    World.cyl(x, z, 0.4 * s, y, y + 4 * s, 'wood');
+    g.cyl(T(x, y, z, 0.3 * s, 1.2 * s, 0.3 * s), COL.trunk, 6);
+    for (let i = 0; i < 3; i++) {
+      g.cyl(T(x, y + (1 + i * 1.1) * s, z, (1.6 - i * 0.4) * s, 1.8 * s, (1.6 - i * 0.4) * s), (p) => mixc(COL.leafDk, COL.leaf, p[1]), 8, { top: 0, flat: true });
+    }
+  }
+  function rock(x, y, z, s) {
+    World.cyl(x, z, s * 0.9, y - 1, y + s * 0.9, 'stone');
+    g.sphere(T(x, y, z, s, s * 0.9, s * 0.95, rng() * 3), (p) => mixc(COL.stoneDk, COL.stone, p[1] * 0.5 + 0.5), 7, 5, { flat: true });
+  }
+  function flower(x, y, z) {
+    const c = [COL.flowerR, COL.flowerY, COL.flowerW][Math.floor(rng() * 3)];
+    g.cyl(T(x, y, z, 0.03, 0.35, 0.03), COL.leafDk, 4, { caps: false });
+    g.sphere(T(x, y + 0.38, z, 0.12, 0.07, 0.12), c, 6, 4, { flat: true });
+    g.sphere(T(x, y + 0.4, z, 0.05, 0.05, 0.05), COL.flowerY, 4, 3);
+  }
+  function tuft(x, y, z) {
+    for (let i = 0; i < 3; i++) {
+      const a = rng() * TAU;
+      g.cyl(T(x + Math.cos(a) * 0.12, y, z + Math.sin(a) * 0.12, 0.07, 0.3 + rng() * 0.2, 0.07, a, (rng() - 0.5) * 0.5), COL.grassDk, 3, { top: 0, flat: true, caps: false });
+    }
+  }
+  function fence(x0, z0, x1, z1, y) {
+    const n = Math.max(1, Math.round(Math.hypot(x1 - x0, z1 - z0) / 1.6));
+    const ang = Math.atan2(x1 - x0, z1 - z0);
+    for (let i = 0; i <= n; i++) {
+      const x = lerp(x0, x1, i / n), z = lerp(z0, z1, i / n);
+      g.box(T(x, y + 0.5, z, 0.18, 1, 0.18), COL.woodDk);
+    }
+    const len = Math.hypot(x1 - x0, z1 - z0);
+    g.box(T((x0 + x1) / 2, y + 0.75, (z0 + z1) / 2, 0.1, 0.12, len, ang), COL.wood);
+    g.box(T((x0 + x1) / 2, y + 0.4, (z0 + z1) / 2, 0.1, 0.12, len, ang), COL.wood);
+    // 柵は低い壁として当たり判定
+    const s = World.add({ type: 'box', x0: Math.min(x0, x1) - 0.1, x1: Math.max(x0, x1) + 0.1, z0: Math.min(z0, z1) - 0.1, z1: Math.max(z0, z1) + 0.1, y0: y, y1: y + 0.9, kind: 'wood' });
+    s.noCam = true;
+  }
+  const acornAt = (x, y, z) => Level.acorns.push({ x, y: y + 0.6, z, got: false, t: rng() * TAU });
+  const acornLine = (x0, y0, z0, x1, y1, z1, n) => { for (let i = 0; i < n; i++) { const t = n === 1 ? 0 : i / (n - 1); acornAt(lerp(x0, x1, t), lerp(y0, y1, t), lerp(z0, z1, t)); } };
+  const acornRing = (x, y, z, r, n) => { for (let i = 0; i < n; i++) { const a = (i / n) * TAU; acornAt(x + Math.cos(a) * r, y, z + Math.sin(a) * r); } };
+  const seedAt = (id, x, y, z, name, hidden = false) => Level.seeds.push({ id, x, y: y + 1.0, z, name, got: false, hidden, t: 0 });
+  const heartAt = (x, y, z) => Level.hearts.push({ x, y: y + 0.8, z, got: false, t: rng() * TAU });
+  const blobAt = (x, y, z, range = 5) => Level.enemies.push({ type: 'blob', x, y, z, hx: x, hz: z, range, yaw: rng() * TAU, vy: 0, alive: true, t: rng() * 5, state: 'walk', st: 0, squish: 1 });
+  const spikyAt = (ax, ay, az, bx, by, bz, speed = 5) => Level.enemies.push({ type: 'spiky', ax, ay, az, bx, by, bz, speed, u: 0, dir: 1, x: ax, y: ay, z: az, alive: true, rot: 0 });
+
+  // ================= 中央の島（はじまりの草原） =================
+  island(0, 0, 28, 0, 10);
+  // 小さな池（氷のように滑る… ではなく見た目の水たまり）
+  g.cyl(T(9, 0.01, 6, 3.2, 0.02, 2.4), hex(0x6fd0ff), 20);
+
+  // 木と飾り
+  tree(-6, 0, 12, 1.0); tree(10, 0, 14, 0.9); tree(16, 0, -4, 1.1); tree(-18, 0, 12, 1.2); tree(20, 0, 8, 0.8);
+  pine(-22, 0, -6, 1.1); pine(-17, 0, -15, 0.9); pine(14, 0, -16, 1.0); pine(22, 0, -12, 0.8);
+  rock(4, 0, 20, 1.2); rock(-12, 0, 20, 0.9); rock(18, 0, 18, 1.4); rock(-24, 0, 4, 1.0);
+  for (let i = 0; i < 90; i++) {
+    const a = rng() * TAU, r = 3 + rng() * 23;
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    if (Math.hypot(x, z + 16) < 7) continue; // 塔の周り
+    if (Math.hypot(x + 12, z + 2) < 6) continue; // 切り株の周り
+    if (rng() < 0.45) flower(x, 0, z); else tuft(x, 0, z);
+  }
+  fence(-4, 24, 4, 24, 0);
+
+  // スタート周りのどんぐり
+  acornRing(0, 0, 10, 3, 8);
+  acornLine(6, 0, 16, 14, 0, 16, 4);
+
+  // ================= ① 切り株の階段 =================
+  {
+    const cx = -12, cz = -2;
+    const n = 8;
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * TAU * 1.1 + 0.5;
+      const r = 4.2;
+      const x = cx + Math.cos(a) * r, z = cz + Math.sin(a) * r;
+      const top = 1.1 + i * 1.15;
+      stump(x, z, 1.35 - i * 0.03, top);
+      if (i % 2 === 1) acornAt(x, top, z);
+    }
+    stump(cx, cz, 1.8, 10.8);
+    seedAt(0, cx, 10.8, cz, '切り株のてっぺん');
+  }
+
+  // ================= ② 風の塔（北） =================
+  {
+    const cx = 0, cz = -17;
+    const H = 24;
+    World.boxC(cx, H / 2 - 2, cz, 5, H + 4, 5, 'stone');
+    g.box(T(cx, H / 2 - 2, cz, 5, H + 4, 5), (p, n) => (n[1] > 0.5 ? COL.stone : mixc(COL.stoneDk, COL.stone, (Math.floor((p[1] + 0.5) * 16) % 2) * 0.4 + 0.5)));
+    // 塔のまわりのらせん足場
+    const steps = 15;
+    for (let i = 0; i < steps; i++) {
+      const a = (i / steps) * TAU * 1.75 + Math.PI / 2;
+      const r = 4.6;
+      const x = cx + Math.cos(a) * r, z = cz + Math.sin(a) * r;
+      const y = 1.4 + i * 1.45;
+      const s = block(x, y - 0.3, z, 2.6, 0.6, 2.6, i % 3 === 2 ? 'wood' : 'stone');
+      if (i === 6 || i === 11) blobAt(x, y, z, 0.6);
+      else if (i % 2 === 0) acornAt(x, y, z);
+      if (i === 9) heartAt(x, y, z);
+      s.tower = true;
+    }
+    // 屋上
+    block(cx, H + 0.25, cz, 7, 0.5, 7, 'stone');
+    for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) block(cx + sx * 3.1, H + 1.2, cz + sz * 3.1, 0.8, 1.4, 0.8, 'stone');
+    seedAt(1, cx, H + 0.5, cz, '風の塔の屋上');
+    // 塔の下から上がる飛び石（ショートカットなし）
+    acornLine(0, 0, -8, 0, 0, -12, 3);
+  }
+
+  // ================= ③ 東の浮島（動く足場の先） =================
+  {
+    // 中央島の端から飛び石
+    block(31, 0.5, 0, 3, 1, 3, 'wood');
+    block(35.5, 1.6, -1.5, 2.6, 0.8, 2.6, 'wood');
+    acornLine(31, 1, 0, 35.5, 2, -1.5, 2);
+    // 動く足場（左右）
+    const mv = { s: World.boxC(42, 2, -1.5, 3.2, 0.6, 3.2, 'wood'), ax: 39.5, bx: 48.5, axis: 'x', speed: 0.5, t: 0, base: [42, 2, -1.5] };
+    Level.movers.push(mv);
+    acornLine(41, 3.2, -1.5, 47, 3.2, -1.5, 4);
+    block(52, 2.4, -1.5, 3, 0.8, 3, 'wood');
+    // 上下に動く足場
+    const mv2 = { s: World.boxC(56, 3, 3, 2.8, 0.6, 2.8, 'stone'), axis: 'y', ay: 2.5, by: 7, speed: 0.4, t: 0, base: [56, 3, 3] };
+    Level.movers.push(mv2);
+    island(64, 4, 10, 7.5, 8);
+    tree(68, 7.5, 9, 0.9); pine(70, 7.5, 0, 0.9); rock(60, 7.5, 10, 0.9);
+    for (let i = 0; i < 20; i++) { const a = rng() * TAU, r = 2 + rng() * 7; flower(64 + Math.cos(a) * r, 7.5, 4 + Math.sin(a) * r); }
+    blobAt(62, 7.5, 2, 4); blobAt(66, 7.5, 6, 4);
+    acornRing(64, 7.5, 4, 5, 8);
+    // 種は台の上
+    block(64, 8.5, 4, 3, 2, 3, 'stone');
+    seedAt(2, 64, 9.5, 4, '東の浮島');
+    // ばね（帰り道）
+    Level.springs.push(World.boxC(58, 7.75, 12, 1.6, 0.5, 1.6, 'spring'));
+  }
+
+  // ================= ④ 西の坂道と高台 =================
+  {
+    // 中央島の西端から坂を上る（-x 方向へ、x=-26 で高さ0 → x=-42 で高さ8）
+    const rx0 = -42, rx1 = -26, rz0 = -3, rz1 = 3, ra = 8;
+    World.ramp(rx0, rz0, rx1, rz1, -3, 'x', ra, 0, 'grass');
+    const len = rx1 - rx0, ang = Math.atan2(ra, len), hyp = Math.hypot(len, ra), th = 4;
+    const mx = (rx0 + rx1) / 2, mh = ra / 2;
+    g.box(T(mx - Math.sin(ang) * th / 2, mh - Math.cos(ang) * th / 2, 0, hyp + 0.4, th, rz1 - rz0, 0, 0, -ang), kindColor('grass'));
+    // 坂の上の踊り場と高台
+    block(-46, 6, 0, 8, 4, 6, 'grass');
+    island(-54, 0, 8, 8, 9);
+    pine(-57, 8, -4, 1); pine(-52, 8, 5, 0.8); rock(-58, 8, 4, 1);
+    const rampY = (x) => ra * (rx1 - x) / len;
+    spikyAt(-41, rampY(-41), 1.5, -27, rampY(-27), 1.5, 7);
+    spikyAt(-27, rampY(-27), -1.5, -41, rampY(-41), -1.5, 6);
+    for (let i = 0; i < 6; i++) { const x = lerp(-28, -40, i / 5); acornAt(x, rampY(x), 0); }
+    seedAt(3, -55, 8, 0, '西の高台');
+    heartAt(-52, 8, -3);
+  }
+
+  // ================= ⑤ 南のかべキック谷 =================
+  {
+    // 橋
+    block(0, -0.3, 33, 3, 0.6, 10, 'wood');
+    for (let i = 0; i < 6; i++) g.box(T(0, 0.02, 28.5 + i * 1.6, 3, 0.04, 0.12), COL.woodDk);
+    island(0, 46, 9, 0, 8);
+    // 高い壁2枚（すき間 3m）
+    block(-2.6, 7, 46, 1.4, 14, 8, 'stone');
+    block(2.6, 7, 46, 1.4, 14, 8, 'stone');
+    block(0, 14.4, 46, 6.6, 0.8, 8, 'stone');
+    seedAt(4, 0, 14.8, 46, '谷のてっぺん');
+    acornLine(0, 1, 39, 0, 8, 46, 5);
+    blobAt(4, 0, 51, 3);
+    tree(-6, 0, 50, 0.8); tree(6, 0, 41, 0.7);
+  }
+
+  // ================= ⑥ どんぐりを 50 個集めると現れる種 =================
+  seedAt(5, 0, 0, 4, 'どんぐり 50 こ', true);
+
+  // 中央島の敵
+  blobAt(-6, 0, -6, 4);
+  blobAt(10, 0, -8, 5);
+  blobAt(14, 0, 4, 4);
+  // ばね（塔の横から高く飛べる）
+  Level.springs.push(World.boxC(6, 0.25, -12, 1.6, 0.5, 1.6, 'spring'));
+  heartAt(-3, 0, 18);
+
+  // どんぐりの総数
+  Level.acornTotal = Level.acorns.length;
+  Level.seedTotal = Level.seeds.length;
+
+  // ばねの見た目は動的に描く。動く足場も同様
+  Level.static = g.mesh();
+  Level.staticTris = g.pos.length / 9;
+
+  // ---- 動く足場のメッシュ ----
+  for (const mv of Level.movers) {
+    const s = mv.s;
+    const sx = s.x1 - s.x0, sy = s.y1 - s.y0, sz = s.z1 - s.z0;
+    mv.mesh = new Geo(0.06).box(T(0, 0, 0, sx, sy, sz), kindColor(s.kind)).mesh();
+  }
+  Models.spring = (() => {
+    const gg = new Geo();
+    gg.cyl(T(0, 0, 0, 0.8, 0.15, 0.8), COL.stoneDk, 14);
+    for (let i = 0; i < 3; i++) gg.torus(T(0, 0.18 + i * 0.12, 0, 0.55, 1, 0.55), COL.spikeTip, 1, 0.08, 14, 5);
+    gg.cyl(T(0, 0.5, 0, 0.8, 0.12, 0.8), hex(0xff5a5a), 14);
+    return gg.mesh();
+  })();
+
+  // ---- 雲（下の雲海と、遠くの雲）----
+  {
+    const cg = new Geo(0.04);
+    const crng = makeRng(7);
+    for (let i = 0; i < 70; i++) {
+      const a = crng() * TAU, r = 30 + crng() * 140;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const y = -22 - crng() * 6;
+      const s = 6 + crng() * 10;
+      cg.sphere(T(x, y, z, s, s * 0.35, s * 0.8, crng() * 3), (p) => mixc(hex(0xdde8f5), COL.cloud, p[1] * 0.5 + 0.5), 10, 6, { flat: true });
+    }
+    for (let i = 0; i < 18; i++) {
+      const a = crng() * TAU, r = 90 + crng() * 60;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r, y = 10 + crng() * 35;
       for (let k = 0; k < 3; k++) {
-        const a = S.wheel + (k * Math.PI) / 3;
-        ctx.beginPath();
-        ctx.moveTo(wpos.x - Math.cos(a) * wheelR, wpos.y - Math.sin(a) * wheelR);
-        ctx.lineTo(wpos.x + Math.cos(a) * wheelR, wpos.y + Math.sin(a) * wheelR);
-        ctx.stroke();
+        const s = 4 + crng() * 5;
+        cg.sphere(T(x + (k - 1) * s * 0.9, y + crng() * 2, z, s, s * 0.6, s * 0.7), (p) => mixc(hex(0xe8f0fa), COL.cloud, p[1] * 0.5 + 0.5), 10, 6, { flat: true });
       }
     }
+    Level.cloudMesh = cg.mesh();
+  }
+  // 空（大きな球の内側）
+  {
+    const sg = new Geo();
+    sg.sphere(T(0, 0, 0, -1, 1, 1), (p) => {
+      const y = p[1];
+      if (y > 0) return mixc(hex(0xbfe4ff), hex(0x4f9ae8), Math.pow(y, 0.7));
+      return mixc(hex(0xbfe4ff), hex(0xe9f3ff), Math.min(1, -y * 3));
+    }, 24, 14);
+    Models.sky = sg.mesh();
+  }
+}
 
-    // フレーム
-    ctx.strokeStyle = '#e0393e';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.moveTo(rear.x, rear.y); ctx.lineTo(seat.x, seat.y);
-    ctx.moveTo(seat.x, seat.y); ctx.lineTo(handle.x, handle.y);
-    ctx.moveTo(handle.x, handle.y); ctx.lineTo(front.x, front.y);
-    ctx.moveTo(rear.x, rear.y); ctx.lineTo(crank.x, crank.y);
-    ctx.moveTo(crank.x, crank.y); ctx.lineTo(front.x, front.y);
-    ctx.moveTo(crank.x, crank.y); ctx.lineTo(seat.x, seat.y);
-    ctx.stroke();
+// 動く足場・ばねなどの更新
+function updateLevel(dt) {
+  for (const s of World.solids) { s.dx = s.dy = s.dz = 0; }
+  for (const mv of Level.movers) {
+    mv.t += dt * mv.speed;
+    const k = 0.5 - 0.5 * Math.cos(mv.t * Math.PI); // 0〜1 往復
+    const s = mv.s;
+    const cx = (s.x0 + s.x1) / 2, cy = (s.y0 + s.y1) / 2, cz = (s.z0 + s.z1) / 2;
+    if (mv.axis === 'x') World.move(s, lerp(mv.ax, mv.bx, k) - cx, 0, 0);
+    if (mv.axis === 'z') World.move(s, 0, 0, lerp(mv.az, mv.bz, k) - cz);
+    if (mv.axis === 'y') World.move(s, 0, lerp(mv.ay, mv.by, k) - cy, 0);
+  }
+  for (const s of Level.springs) s.boing = Math.max(0, (s.boing || 0) - dt * 3);
+}
 
-    // ペダル
-    const pa = S.wheel * 0.9;
-    const p1 = { x: crank.x + Math.cos(pa) * 11, y: crank.y + Math.sin(pa) * 11 };
-    const p2 = { x: crank.x - Math.cos(pa) * 11, y: crank.y - Math.sin(pa) * 11 };
-    ctx.strokeStyle = '#22252a';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(crank.x, crank.y); ctx.lineTo(p1.x, p1.y);
-    ctx.moveTo(crank.x, crank.y); ctx.lineTo(p2.x, p2.y);
-    ctx.stroke();
+function drawLevel() {
+  // 空
+  gl.depthMask(false);
+  gl.disable(gl.CULL_FACE);
+  drawMesh(Models.sky, T(R.cam[0], R.cam[1], R.cam[2], 300, 300, 300), WHITE, 1, 1);
+  gl.enable(gl.CULL_FACE);
+  gl.depthMask(true);
+  drawMesh(Level.cloudMesh, T(), WHITE, 0.55, 1);
+  drawMesh(Level.static, M4.ident());
+  for (const mv of Level.movers) {
+    const s = mv.s;
+    drawMesh(mv.mesh, T((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2, (s.z0 + s.z1) / 2));
+  }
+  for (const s of Level.springs) {
+    const b = s.boing || 0;
+    drawMesh(Models.spring, T((s.x0 + s.x1) / 2, s.y0, (s.z0 + s.z1) / 2, 1, 1 + Math.sin(b * 12) * b * 0.6, 1));
+  }
+}
 
-    // 人
-    const hip = { x: -7, y: -68 };
-    const shoulder = { x: 9, y: -94 };
-    // 脚（膝を付けてペダルへ）
-    ctx.strokeStyle = '#2b3a67';
-    ctx.lineWidth = 6;
-    for (const p of [p1, p2]) {
-      const knee = { x: (hip.x + p.x) / 2 + 7, y: (hip.y + p.y) / 2 - 6 };
-      ctx.beginPath();
-      ctx.moveTo(hip.x, hip.y); ctx.lineTo(knee.x, knee.y); ctx.lineTo(p.x, p.y);
-      ctx.stroke();
+// ===== 75_entities.js =====
+// アイテム・敵の動き
+function updateEntities(dt) {
+  const px = P.x, py = P.y + 0.65, pz = P.z;
+  const alive = P.state !== 'dead' && P.state !== 'win';
+
+  // どんぐり
+  for (const a of Level.acorns) {
+    if (a.got) continue;
+    a.t += dt * 3;
+    if (alive && Math.abs(a.x - px) < 1 && Math.abs(a.z - pz) < 1 && Math.abs(a.y - py) < 1.2) {
+      const d = Math.hypot(a.x - px, a.y - py, a.z - pz);
+      if (d < 1.05) {
+        a.got = true;
+        Game.acorns++;
+        Sound.play('acorn');
+        Fx.burst(a.x, a.y, a.z, [1, 0.85, 0.4], 6, 3);
+        if (Game.acorns === 50) Game.revealSeed(5);
+      }
     }
-    // 胴
-    ctx.strokeStyle = '#35a0db';
-    ctx.lineWidth = 8;
-    ctx.beginPath(); ctx.moveTo(hip.x, hip.y); ctx.lineTo(shoulder.x, shoulder.y); ctx.stroke();
-    // 腕
-    ctx.strokeStyle = '#f2c29b';
-    ctx.lineWidth = 5;
-    ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(handle.x, handle.y - 2); ctx.stroke();
-    // 頭＋帽子
-    ctx.fillStyle = '#f2c29b';
-    ctx.beginPath(); ctx.arc(shoulder.x + 5, shoulder.y - 13, 10, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#ffd94d';
-    ctx.beginPath(); ctx.arc(shoulder.x + 5, shoulder.y - 16, 10, Math.PI, Math.PI * 2); ctx.fill();
-    ctx.fillRect(shoulder.x + 3, shoulder.y - 17, 16, 4);
-
-    ctx.restore();
-
-    // チャージメーター
-    if (S.mode === 'run' && S.charging) {
-      const w = 110, x = PX - 42, y = S.py - 148;
-      ctx.fillStyle = 'rgba(0,0,0,.35)';
-      rr(x - 3, y - 3, w + 6, 16, 6); ctx.fill();
-      ctx.fillStyle = S.charge >= 1 ? '#ff5252' : '#ffb02e';
-      if (S.charge > 0) { rr(x, y, w * S.charge, 10, 5); ctx.fill(); }
+  }
+  // ハート
+  for (const h of Level.hearts) {
+    if (h.got) continue;
+    h.t += dt * 2;
+    if (alive && Math.hypot(h.x - px, h.y - py, h.z - pz) < 1.2) {
+      h.got = true;
+      P.hp = P.maxHp;
+      Sound.play('heart');
+      Fx.burst(h.x, h.y, h.z, COL.heart, 10, 4);
+      Game.toast('ハートで元気いっぱい！');
+    }
+  }
+  // ひかりの種
+  for (const s of Level.seeds) {
+    if (s.got || s.hidden) continue;
+    s.t += dt;
+    if (Math.random() < dt * 8) Fx.sparkle(s.x, s.y + 0.7, s.z, [0.8, 1, 0.95]);
+    if (alive && Math.hypot(s.x - px, s.y + 0.6 - py, s.z - pz) < 1.5) {
+      s.got = true;
+      Game.getSeed(s);
     }
   }
 
-  function drawHud() {
-    ctx.fillStyle = '#12303f';
-    ctx.font = 'bold 30px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText(`${Math.floor(S.dist)} m`, 22, 44);
-    ctx.textAlign = 'right';
-    ctx.font = 'bold 20px sans-serif';
-    ctx.fillText(`ベスト ${S.best} m`, W - 22, 38);
-    ctx.textAlign = 'left';
-  }
-
-  function drawTitle() {
-    ctx.fillStyle = 'rgba(10, 35, 50, .55)';
-    ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center';
-    ctx.font = 'bold 84px sans-serif';
-    ctx.fillText('チャリラン', W / 2, 208);
-    ctx.font = 'bold 24px sans-serif';
-    ctx.fillText('チャリ走風・自転車ジャンプゲーム', W / 2, 252);
-    ctx.font = '20px sans-serif';
-    ctx.fillText('長押し（タップ / スペース）でジャンプをためる', W / 2, 312);
-    ctx.fillText('離すとジャンプ。障害物の上には乗れる。側面に当たると転倒', W / 2, 344);
-    ctx.font = 'bold 26px sans-serif';
-    ctx.fillText('タップでスタート', W / 2, 420);
-    ctx.textAlign = 'left';
-  }
-
-  function drawOver() {
-    ctx.fillStyle = 'rgba(10, 35, 50, .45)';
-    ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = '#fff';
-    ctx.textAlign = 'center';
-    ctx.font = 'bold 56px sans-serif';
-    ctx.fillText('転倒…！', W / 2, 190);
-    ctx.font = 'bold 34px sans-serif';
-    ctx.fillText(`${Math.floor(S.dist)} m`, W / 2, 258);
-    ctx.font = '22px sans-serif';
-    ctx.fillText(`ベスト ${S.best} m`, W / 2, 296);
-    if (S.t - S.overAt > 0.6) {
-      ctx.font = 'bold 24px sans-serif';
-      ctx.fillText('タップでリトライ', W / 2, 372);
+  // 敵
+  for (const e of Level.enemies) {
+    if (!e.alive) {
+      e.deadT = (e.deadT || 0) + dt;
+      continue;
     }
-    ctx.textAlign = 'left';
+    if (e.type === 'blob') updateBlob(e, dt);
+    else if (e.type === 'spiky') updateSpiky(e, dt);
+  }
+}
+
+function updateBlob(e, dt) {
+  e.t += dt;
+  e.squish = lerp(e.squish, 1, dt * 8);
+  const dx = P.x - e.x, dz = P.z - e.z;
+  const dist = Math.hypot(dx, dz);
+  const dy = P.y - e.y;
+  // 見つけたら追いかける
+  const chase = dist < 9 && Math.abs(dy) < 3 && P.state !== 'dead';
+  let speed = 1.6;
+  let want = e.yaw;
+  if (chase) {
+    want = Math.atan2(dx, dz);
+    speed = 3.6;
+    if (e.state !== 'chase') { e.state = 'chase'; e.vy = 5; e.squish = 1.3; }
+  } else {
+    e.state = 'walk';
+    const hx = e.hx - e.x, hz = e.hz - e.z;
+    if (Math.hypot(hx, hz) > e.range) want = Math.atan2(hx, hz);
+    else if (Math.sin(e.t * 0.7) > 0.95) want = e.yaw + 0.05;
+  }
+  e.yaw += clamp(angDiff(e.yaw, want), -dt * 4, dt * 4);
+  const nx = e.x + Math.sin(e.yaw) * speed * dt;
+  const nz = e.z + Math.cos(e.yaw) * speed * dt;
+  // 崖から落ちないように：進む先に地面がなければ止まる
+  const gAhead = groundBelow(nx + Math.sin(e.yaw) * 0.6, nz + Math.cos(e.yaw) * 0.6, e.y + 0.5, 0);
+  if (gAhead && Math.abs(gAhead.y - e.y) < 0.6) {
+    const homeD = Math.hypot(nx - e.hx, nz - e.hz);
+    if (homeD < e.range + 6) { e.x = nx; e.z = nz; }
+  } else if (!chase) e.yaw += Math.PI * 0.5;
+  // 重力
+  e.vy -= 30 * dt;
+  e.y += e.vy * dt;
+  const g = groundBelow(e.x, e.z, e.y + 0.5, 0.3);
+  if (g && e.y <= g.y) { e.y = g.y; e.vy = 0; if (g.s.dx || g.s.dz || g.s.dy) { e.x += g.s.dx; e.z += g.s.dz; } }
+  if (e.y < World.killY) e.alive = false;
+  // 主人公との当たり
+  if (P.state === 'dead' || P.inv > 0.0 && P.state === 'hurt') return;
+  const r = 0.62 + P.r;
+  const pd = Math.hypot(P.x - e.x, P.z - e.z);
+  if (pd < r && P.y < e.y + 1.2 && P.y + P.h > e.y) {
+    const stomp = (P.vy < 0 && P.y > e.y + 0.55) || P.state === 'pound';
+    const hitting = P.state === 'punch' && P.stateT < 0.25 || P.kickT > 0;
+    if (stomp) {
+      killEnemy(e, 'stomp');
+      if (P.state !== 'pound') { P.vy = Input.jump ? 17 : 12; P.state = 'air'; P.jumpHeld = true; P.grounded = false; }
+    } else if (hitting) {
+      killEnemy(e, 'punch');
+    } else if (P.inv <= 0) {
+      playerHurt(e.x, e.z);
+    }
+  } else if (pd < r + 0.9 && P.state === 'punch' && P.stateT < 0.25) {
+    // パンチは少し先まで届く
+    const fx = Math.sin(P.yaw), fz = Math.cos(P.yaw);
+    if ((e.x - P.x) * fx + (e.z - P.z) * fz > 0 && Math.abs(P.y - e.y) < 1.2) killEnemy(e, 'punch');
+  }
+}
+
+function killEnemy(e, how) {
+  e.alive = false;
+  e.deadT = 0;
+  e.how = how;
+  Sound.play('stomp');
+  Fx.burst(e.x, e.y + 0.5, e.z, COL.enemy, 14, 6);
+  Game.shake = 0.12;
+  // 倒すとどんぐりが出る
+  Level.acorns.push({ x: e.x, y: e.y + 0.8, z: e.z, got: false, t: 0, bonus: true });
+  Level.acornTotal++;
+}
+
+function updateSpiky(e, dt) {
+  const len = Math.hypot(e.bx - e.ax, e.bz - e.az);
+  e.u += (e.speed / len) * dt * e.dir;
+  if (e.u > 1) { e.u = 1; e.dir = -1; }
+  if (e.u < 0) { e.u = 0; e.dir = 1; }
+  e.x = lerp(e.ax, e.bx, e.u);
+  e.z = lerp(e.az, e.bz, e.u);
+  const g = groundBelow(e.x, e.z, Math.max(e.ay, e.by) + 2, 0);
+  e.y = (g ? g.y : lerp(e.ay, e.by, e.u)) + 0.75;
+  e.rot += (e.speed / 0.75) * dt * e.dir;
+  e.yaw = Math.atan2(e.bx - e.ax, e.bz - e.az);
+  if (P.state === 'dead') return;
+  const d = Math.hypot(P.x - e.x, P.y + 0.6 - e.y, P.z - e.z);
+  if (d < 0.9 + P.r) playerHurt(e.x, e.z);
+}
+
+// ヒップドロップの衝撃：近くの敵を倒す
+function poundShock(x, y, z) {
+  for (const e of Level.enemies) {
+    if (!e.alive || e.type !== 'blob') continue;
+    if (Math.hypot(e.x - x, e.z - z) < 2.6 && Math.abs(e.y - y) < 1) killEnemy(e, 'pound');
+  }
+}
+
+function drawEntities() {
+  const t = Game.time;
+  for (const a of Level.acorns) {
+    if (a.got) continue;
+    drawMesh(Models.acorn, T(a.x, a.y + Math.sin(a.t) * 0.12, a.z, 1.2, 1.2, 1.2, a.t * 1.3));
+    drawShadow(a.x, a.y, a.z, 0.3, 0.2);
+  }
+  for (const h of Level.hearts) {
+    if (h.got) continue;
+    drawMesh(Models.heart, T(h.x, h.y + Math.sin(h.t) * 0.15, h.z, 1.3, 1.3, 1.3, h.t), WHITE, 0.25);
+    drawShadow(h.x, h.y, h.z, 0.4, 0.2);
+  }
+  for (const s of Level.seeds) {
+    if (s.got || s.hidden) continue;
+    const pulse = 1 + Math.sin(s.t * 4) * 0.06;
+    drawMesh(Models.seed, T(s.x, s.y + Math.sin(s.t * 2) * 0.2, s.z, pulse, pulse, pulse, s.t * 1.5), WHITE, 0.55);
+    drawShadow(s.x, s.y, s.z, 0.7, 0.25);
+  }
+  for (const e of Level.enemies) {
+    if (!e.alive) {
+      if (e.deadT < 0.3 && e.type === 'blob') {
+        const k = 1 - e.deadT / 0.3;
+        drawMesh(Models.blob, T(e.x, e.y, e.z, 1 + (1 - k) * 0.6, k * 0.3 + 0.05, 1 + (1 - k) * 0.6, e.yaw));
+      }
+      continue;
+    }
+    if (e.type === 'blob') {
+      const wob = 1 + Math.sin(e.t * (e.state === 'chase' ? 14 : 7)) * 0.06;
+      const sq = e.squish * wob;
+      drawMesh(Models.blob, T(e.x, e.y, e.z, 1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq), e.yaw));
+      drawShadow(e.x, e.y + 0.1, e.z, 0.7);
+    } else {
+      const m = T(e.x, e.y, e.z, 1, 1, 1, e.yaw);
+      M4.rotX(m, e.rot);
+      drawMesh(Models.spiky, m);
+      drawShadow(e.x, e.y - 0.6, e.z, 0.75);
+    }
+  }
+  void t;
+}
+
+// ===== 90_game.js =====
+// ゲーム全体の進行・画面表示・メインループ
+const hud = hudCanvas.getContext('2d');
+
+const Game = {
+  state: 'title',   // title | play | pause | seed | dead | clear
+  time: 0,          // 経過時間（演出用）
+  playTime: 0,      // プレイ時間
+  stT: 0,
+  acorns: 0,
+  seeds: 0,
+  shake: 0,
+  toasts: [],
+  lastSeed: null,
+  best: Number(localStorage.getItem('koron-best') || 0),
+  fps: 60,
+
+  newGame() {
+    buildLevelState();
+    this.acorns = 0; this.seeds = 0; this.playTime = 0;
+    P.hp = P.maxHp;
+    const s = Level.start;
+    playerReset(s.x, s.y, s.z, s.yaw);
+    camReset();
+    this.state = 'play'; this.stT = 0;
+    this.toast('ひかりの種を ' + Level.seedTotal + ' こ 集めよう！', 4);
+  },
+  toast(msg, dur = 2.6) { this.toasts.push({ msg, t: 0, dur }); if (this.toasts.length > 3) this.toasts.shift(); },
+  getSeed(s) {
+    this.seeds++;
+    this.lastSeed = s;
+    Sound.play('seed');
+    Fx.burst(s.x, s.y + 0.7, s.z, [0.7, 1, 0.95], 30, 8);
+    P.hp = P.maxHp;
+    if (this.seeds >= Level.seedTotal) {
+      this.state = 'clear'; this.stT = 0;
+      P.state = 'win'; P.vx = P.vz = 0;
+      setTimeout(() => Sound.play('clear'), 600);
+      const t = this.playTime;
+      if (!this.best || t < this.best) { this.best = t; localStorage.setItem('koron-best', String(t)); this.newRecord = true; }
+      else this.newRecord = false;
+    } else {
+      this.state = 'seed'; this.stT = 0;
+      P.state = 'win';
+    }
+  },
+  revealSeed(id) {
+    const s = Level.seeds.find((q) => q.id === id);
+    if (!s || !s.hidden) return;
+    s.hidden = false;
+    Sound.play('seed');
+    Fx.burst(s.x, s.y + 0.7, s.z, [0.7, 1, 0.95], 24, 6);
+    this.toast('どんぐり50こ！ スタート地点に ひかりの種が あらわれた！', 4);
+  },
+  onFall() {
+    if (P.state === 'dead') return;
+    Sound.play('fall');
+    P.hp -= 1;
+    if (P.hp <= 0) { playerDie(); return; }
+    playerReset(P.safe[0], P.safe[1] + 0.2, P.safe[2], P.yaw);
+    P.inv = 2;
+    camReset();
+    this.toast('落っこちた！', 1.6);
+  },
+  onDeath() { this.state = 'dead'; this.stT = 0; },
+  onPound(x, y, z) { poundShock(x, y, z); },
+};
+
+// 敵やアイテムを初期状態に戻す（ステージを作り直す）
+function buildLevelState() {
+  buildLevel();
+}
+
+function fmtTime(t) {
+  const m = Math.floor(t / 60), s = Math.floor(t % 60), cs = Math.floor((t * 100) % 100);
+  return `${m}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+}
+
+// ---------------- 更新 ----------------
+function update(dt) {
+  Game.time += dt;
+  Game.stT += dt;
+  Game.shake = Math.max(0, Game.shake - dt);
+  for (const t of Game.toasts) t.t += dt;
+  Game.toasts = Game.toasts.filter((t) => t.t < t.dur);
+
+  if (Game.state === 'title') {
+    titleCamera(dt);
+    updateLevel(dt);
+    if (Input.anyP && Game.stT > 0.3) { Sound.play('select'); Game.newGame(); }
+    return;
+  }
+  if (Game.state === 'pause') {
+    if (Input.pauseP || Input.jumpP) { Game.state = 'play'; }
+    return;
+  }
+  if (Input.pauseP && Game.state === 'play') { Game.state = 'pause'; return; }
+
+  if (Game.state === 'play') Game.playTime += dt;
+
+  if (Game.state === 'play' || Game.state === 'dead') {
+    updateLevel(dt);
+    updatePlayer(dt);
+    updateEntities(dt);
+    updateCamera(dt);
+  } else if (Game.state === 'seed' || Game.state === 'clear') {
+    updatePlayer(dt);
+    // 種を取った演出：カメラが正面に回る
+    const a = P.yaw;
+    const d = 5.5;
+    Cam.override = {
+      eye: [P.x + Math.sin(a) * d, P.y + 2.2, P.z + Math.cos(a) * d],
+      target: [P.x, P.y + 1, P.z],
+    };
+    updateCamera(dt);
+    if (Game.state === 'seed' && Game.stT > 2.6) {
+      Cam.override = null;
+      P.state = 'ground';
+      Game.state = 'play';
+      Game.toast(`ひかりの種 ${Game.seeds} / ${Level.seedTotal}`, 2.5);
+    }
+    if (Game.state === 'clear' && Game.stT > 3 && Input.anyP) {
+      Cam.override = null;
+      Game.state = 'title'; Game.stT = 0;
+    }
+  }
+  if (Game.state === 'dead' && Game.stT > 2.2) {
+    if (Input.anyP || Game.stT > 6) {
+      // その場の進み具合は残して、スタート地点から再開
+      P.hp = P.maxHp;
+      const s = Level.start;
+      playerReset(s.x, s.y, s.z, s.yaw);
+      P.inv = 1.5;
+      camReset();
+      Game.state = 'play';
+    }
+  }
+  Fx.update(dt);
+}
+
+function titleCamera(dt) {
+  const a = Game.time * 0.08;
+  Cam.override = null;
+  Cam.eye = [Math.sin(a) * 46, 22 + Math.sin(a * 0.7) * 4, Math.cos(a) * 46];
+  Cam.target = [0, 4, -4];
+}
+
+// ---------------- 描画 ----------------
+function render() {
+  if (!R.ok) return;
+  beginFrame(Cam.eye, Cam.target || [0, 0, 0], Cam.fov);
+  drawLevel();
+  if (Game.state !== 'title') drawPlayer();
+  drawEntities();
+  // 半透明もの（影・粒）
+  setBlend(true);
+  gl.enable(gl.POLYGON_OFFSET_FILL);
+  gl.polygonOffset(-2, -2);
+  if (Game.state !== 'title' && P.state !== 'dead') drawShadow(P.x, P.y, P.z, 0.55, 0.38);
+  gl.disable(gl.POLYGON_OFFSET_FILL);
+  Fx.draw();
+  setBlend(false);
+}
+
+// ---------------- 画面の文字・ボタン ----------------
+let hudW = 0, hudH = 0, hudDpr = 1;
+function resizeHud() {
+  hudDpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = window.innerWidth, h = window.innerHeight;
+  if (w !== hudW || h !== hudH || hudCanvas.width !== Math.floor(w * hudDpr)) {
+    hudW = w; hudH = h;
+    hudCanvas.width = Math.floor(w * hudDpr);
+    hudCanvas.height = Math.floor(h * hudDpr);
+    layoutTouch(w, h);
+  }
+}
+
+function txt(s, x, y, size, color = '#fff', align = 'left', stroke = 'rgba(30,40,70,.85)') {
+  hud.font = `bold ${size}px "Hiragino Maru Gothic ProN","Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif`;
+  hud.textAlign = align;
+  hud.textBaseline = 'middle';
+  hud.lineJoin = 'round';
+  hud.lineWidth = Math.max(3, size * 0.2);
+  hud.strokeStyle = stroke;
+  hud.strokeText(s, x, y);
+  hud.fillStyle = color;
+  hud.fillText(s, x, y);
+}
+
+function drawHeartIcon(x, y, s, full) {
+  hud.save();
+  hud.translate(x, y);
+  hud.scale(s / 20, s / 20);
+  hud.beginPath();
+  hud.moveTo(0, 6);
+  hud.bezierCurveTo(-10, -2, -10, -12, 0, -6);
+  hud.bezierCurveTo(10, -12, 10, -2, 0, 6);
+  hud.closePath();
+  hud.fillStyle = full ? '#ff4f6d' : 'rgba(255,255,255,.25)';
+  hud.strokeStyle = 'rgba(30,40,70,.85)';
+  hud.lineWidth = 2.5;
+  hud.stroke();
+  hud.fill();
+  hud.restore();
+}
+
+function drawAcornIcon(x, y, s) {
+  hud.save();
+  hud.translate(x, y);
+  hud.fillStyle = '#c98a3e'; hud.strokeStyle = 'rgba(30,40,70,.85)'; hud.lineWidth = 2;
+  hud.beginPath(); hud.ellipse(0, s * 0.12, s * 0.32, s * 0.4, 0, 0, TAU); hud.fill(); hud.stroke();
+  hud.fillStyle = '#7a5230';
+  hud.beginPath(); hud.ellipse(0, -s * 0.18, s * 0.38, s * 0.2, 0, 0, TAU); hud.fill(); hud.stroke();
+  hud.restore();
+}
+
+function drawSeedIcon(x, y, s, on) {
+  hud.save();
+  hud.translate(x, y);
+  hud.beginPath();
+  hud.moveTo(0, -s * 0.5); hud.lineTo(s * 0.32, 0); hud.lineTo(0, s * 0.5); hud.lineTo(-s * 0.32, 0); hud.closePath();
+  hud.fillStyle = on ? '#9cfff0' : 'rgba(255,255,255,.22)';
+  hud.strokeStyle = 'rgba(30,40,70,.85)'; hud.lineWidth = 2;
+  hud.fill(); hud.stroke();
+  hud.restore();
+}
+
+function drawHud() {
+  resizeHud();
+  hud.setTransform(hudDpr, 0, 0, hudDpr, 0, 0);
+  hud.clearRect(0, 0, hudW, hudH);
+  const W = hudW, H = hudH;
+  const small = Math.min(W, H) < 500;
+  const fs = small ? 16 : 20;
+
+  if (!R.ok) {
+    txt('この端末では 3D 表示（WebGL2）が使えません', W / 2, H / 2, 18, '#fff', 'center');
+    return;
   }
 
-  function draw() {
-    drawBackground();
-    for (const o of S.obstacles) drawObstacle(o);
-    drawPlayer();
-    if (S.mode === 'run') drawHud();
-    if (S.mode === 'title') drawTitle();
-    if (S.mode === 'over') drawOver();
+  if (Game.state === 'title') {
+    hud.fillStyle = 'rgba(20,40,80,.18)';
+    hud.fillRect(0, 0, W, H);
+    const ts = clamp(W / 14, 26, 64);
+    const bob = Math.sin(Game.time * 2) * 4;
+    txt('ころんの', W / 2, H * 0.26 + bob, ts * 0.6, '#fff6d8', 'center');
+    txt('空島アドベンチャー', W / 2, H * 0.26 + ts * 0.85 + bob, ts, '#ffd166', 'center');
+    if (Math.floor(Game.time * 2) % 2 === 0) txt(Input.touchMode || 'ontouchstart' in window ? 'タップでスタート' : 'Enter / スペースでスタート', W / 2, H * 0.62, fs + 2, '#fff', 'center');
+    const lines = 'ontouchstart' in window && Input.touchMode !== false
+      ? ['左側をなぞって移動 ／ 右側をドラッグでカメラ', 'ジャンプ・パンチ・しゃがむ はボタンで']
+      : ['移動：WASD / 矢印　ジャンプ：スペース　パンチ：J　しゃがむ：Shift', 'カメラ：Q・E またはマウスでドラッグ　遠近：R　ポーズ：Esc'];
+    lines.forEach((l, i) => txt(l, W / 2, H * 0.74 + i * (fs + 8), fs * 0.75, '#e8f4ff', 'center'));
+    if (Game.best) txt('ベストクリア ' + fmtTime(Game.best), W / 2, H * 0.9, fs * 0.8, '#ffe9a8', 'center');
+    return;
   }
 
-  // ---------- ループ ----------
-  let last = performance.now();
-  function frame(now) {
-    const dt = Math.min(0.033, (now - last) / 1000);
-    last = now;
-    update(dt);
-    draw();
-    requestAnimationFrame(frame);
+  // 体力
+  for (let i = 0; i < P.maxHp; i++) drawHeartIcon(26 + i * 34, 30, small ? 28 : 32, i < P.hp);
+  // どんぐり
+  drawAcornIcon(26, 70, 26);
+  txt('× ' + Game.acorns, 44, 71, fs + 2);
+  // 種
+  for (let i = 0; i < Level.seedTotal; i++) drawSeedIcon(W / 2 - (Level.seedTotal - 1) * 14 + i * 28, 28, 26, i < Game.seeds);
+  // 時間
+  txt(fmtTime(Game.playTime), W - (Input.touchMode ? 70 : 20), 30, fs, '#fff', 'right');
+
+  // メッセージ
+  Game.toasts.forEach((t, i) => {
+    const a = Math.min(1, t.t * 4, (t.dur - t.t) * 2);
+    hud.globalAlpha = a;
+    txt(t.msg, W / 2, H * 0.2 + i * (fs + 14), fs + 2, '#fff', 'center');
+    hud.globalAlpha = 1;
+  });
+
+  if (Game.state === 'seed' && Game.lastSeed) {
+    const k = Math.min(1, Game.stT * 3);
+    txt('ひかりの種 ゲット！', W / 2, H * 0.32 - (1 - k) * 30, clamp(W / 16, 26, 52) * k, '#9cfff0', 'center');
+    txt(Game.lastSeed.name, W / 2, H * 0.32 + 48, fs, '#fff', 'center');
   }
+  if (Game.state === 'clear') {
+    hud.fillStyle = `rgba(255,250,220,${Math.min(0.35, Game.stT * 0.2)})`;
+    hud.fillRect(0, 0, W, H);
+    txt('ぜんぶ 集めた！ クリア！', W / 2, H * 0.3, clamp(W / 16, 26, 54), '#ffd166', 'center');
+    txt('タイム ' + fmtTime(Game.playTime) + (Game.newRecord ? '  ベスト更新！' : ''), W / 2, H * 0.3 + 56, fs + 4, '#fff', 'center');
+    txt('どんぐり ' + Game.acorns + ' こ', W / 2, H * 0.3 + 92, fs, '#fff', 'center');
+    if (Game.stT > 3) txt('タップ / Enter でタイトルへ', W / 2, H * 0.75, fs, '#fff', 'center');
+  }
+  if (Game.state === 'dead') {
+    hud.fillStyle = `rgba(30,10,30,${Math.min(0.45, Game.stT * 0.3)})`;
+    hud.fillRect(0, 0, W, H);
+    txt('ころんは たおれてしまった…', W / 2, H * 0.38, clamp(W / 20, 22, 40), '#fff', 'center');
+    if (Game.stT > 2.2) txt('タップ / Enter で スタート地点から再開', W / 2, H * 0.5, fs, '#ffe9a8', 'center');
+  }
+  if (Game.state === 'pause') {
+    hud.fillStyle = 'rgba(20,30,60,.5)';
+    hud.fillRect(0, 0, W, H);
+    txt('ポーズ', W / 2, H * 0.3, 44, '#fff', 'center');
+    const got = Level.seeds.filter((s) => s.got).map((s) => '◆ ' + s.name);
+    const left = Level.seeds.filter((s) => !s.got).length;
+    got.forEach((g, i) => txt(g, W / 2, H * 0.42 + i * (fs + 6), fs * 0.85, '#9cfff0', 'center'));
+    txt('のこり ' + left + ' こ', W / 2, H * 0.42 + got.length * (fs + 6) + 10, fs * 0.85, '#fff', 'center');
+    txt('ジャンプ / Esc で つづける', W / 2, H * 0.85, fs, '#ffe9a8', 'center');
+  }
+
+  // タッチ操作ボタン
+  if (Input.touchMode && (Game.state === 'play' || Game.state === 'pause')) drawTouchUI();
+}
+
+function drawTouchUI() {
+  hud.save();
+  for (const k in Input.btns) {
+    const b = Input.btns[k];
+    hud.beginPath();
+    hud.arc(b.x, b.y, b.r, 0, TAU);
+    hud.fillStyle = b.down ? 'rgba(255,255,255,.55)' : 'rgba(255,255,255,.22)';
+    hud.fill();
+    hud.lineWidth = 2.5;
+    hud.strokeStyle = 'rgba(255,255,255,.7)';
+    hud.stroke();
+    txt(b.label, b.x, b.y, k === 'pause' || k === 'camera' ? 16 : Math.max(11, b.r * 0.34), '#fff', 'center');
+  }
+  if (Input.stick) {
+    const s = Input.stick;
+    hud.beginPath(); hud.arc(s.ox, s.oy, 60, 0, TAU);
+    hud.fillStyle = 'rgba(255,255,255,.15)'; hud.fill();
+    hud.strokeStyle = 'rgba(255,255,255,.5)'; hud.lineWidth = 2; hud.stroke();
+    let dx = s.x - s.ox, dy = s.y - s.oy; const d = Math.hypot(dx, dy);
+    if (d > 60) { dx *= 60 / d; dy *= 60 / d; }
+    hud.beginPath(); hud.arc(s.ox + dx, s.oy + dy, 26, 0, TAU);
+    hud.fillStyle = 'rgba(255,255,255,.6)'; hud.fill();
+  } else {
+    txt('ここをなぞって移動', 90, hudH - 40, 13, 'rgba(255,255,255,.75)', 'center');
+  }
+  hud.restore();
+}
+
+// ---------------- メインループ ----------------
+let lastT = performance.now();
+function frame(now) {
+  let dt = (now - lastT) / 1000;
+  lastT = now;
+  if (dt > 0.1) dt = 0.1;
+  Game.fps = lerp(Game.fps, 1 / Math.max(dt, 1e-3), 0.05);
+  pollInput();
+  // 物理は細かく刻む（1/120 秒ずつ）
+  const step = 1 / 120;
+  let acc = dt, first = true;
+  while (acc > 1e-6) {
+    const h = Math.min(step, acc);
+    update(h);
+    if (first) { clearPressed(); first = false; }
+    acc -= h;
+  }
+  render();
+  drawHud();
   requestAnimationFrame(frame);
-})();
-</script>
+}
+
+function boot() {
+  try {
+    initGL();
+    if (R.ok) { buildModels(); buildLevel(); }
+  } catch (e) {
+    R.ok = false;
+    console.error(e);
+  }
+  Cam.eye = [40, 20, 40]; Cam.target = [0, 0, 0];
+  window.KORON = { Game, P, Cam, Level, World, Input, R };
+  requestAnimationFrame(frame);
+}
+boot();
+
+})();</script>
 </body>
 </html>

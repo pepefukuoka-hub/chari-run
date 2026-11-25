@@ -1,0 +1,143 @@
+// 当たり判定の世界（足場＝箱・坂・円柱）
+// 箱 : {type:'box', x0,y0,z0,x1,y1,z1}
+// 坂 : 箱に ramp:{axis:'x'|'z', a, b}（軸の始点の高さ a → 終点の高さ b、y1 = max(a,b)）
+// 円柱: {type:'cyl', x,z,r,y0,y1}
+// 共通: kind（'grass' 'stone' 'wood' 'ice' 'spring' 'lava'）, dx,dy,dz（このフレームの移動量）
+const World = {
+  solids: [],
+  killY: -40,
+  clear() { this.solids = []; },
+  add(s) {
+    s.dx = s.dy = s.dz = 0;
+    s.kind = s.kind || 'grass';
+    this.solids.push(s);
+    return s;
+  },
+  box(x0, y0, z0, x1, y1, z1, kind) {
+    return this.add({ type: 'box', x0: Math.min(x0, x1), y0: Math.min(y0, y1), z0: Math.min(z0, z1), x1: Math.max(x0, x1), y1: Math.max(y0, y1), z1: Math.max(z0, z1), kind });
+  },
+  // 中心とサイズで箱
+  boxC(cx, cy, cz, sx, sy, sz, kind) {
+    return this.box(cx - sx / 2, cy - sy / 2, cz - sz / 2, cx + sx / 2, cy + sy / 2, cz + sz / 2, kind);
+  },
+  ramp(x0, z0, x1, z1, y0, axis, a, b, kind) {
+    const s = this.box(x0, y0, z0, x1, Math.max(a, b), z1, kind);
+    s.ramp = { axis, a, b };
+    return s;
+  },
+  cyl(x, z, r, y0, y1, kind) {
+    return this.add({ type: 'cyl', x, z, r, y0, y1, kind });
+  },
+  move(s, dx, dy, dz) {
+    if (s.type === 'cyl') { s.x += dx; s.z += dz; } else { s.x0 += dx; s.x1 += dx; s.z0 += dz; s.z1 += dz; }
+    s.y0 += dy; s.y1 += dy;
+    s.dx += dx; s.dy += dy; s.dz += dz;
+  },
+};
+
+// 上面の高さ
+function topAt(s, x, z) {
+  if (!s.ramp) return s.y1;
+  const r = s.ramp;
+  const t = r.axis === 'x' ? (x - s.x0) / (s.x1 - s.x0) : (z - s.z0) / (s.z1 - s.z0);
+  return lerp(r.a, r.b, clamp(t, 0, 1)) + (s.y1 - Math.max(r.a, r.b)); // 動く坂にも対応
+}
+
+// (x,z) が足場の上か（pad だけ外側まで許す）
+function overXZ(s, x, z, pad) {
+  if (s.type === 'cyl') return Math.hypot(x - s.x, z - s.z) <= s.r + pad;
+  return x >= s.x0 - pad && x <= s.x1 + pad && z >= s.z0 - pad && z <= s.z1 + pad;
+}
+
+// 足元の地面を探す：yFrom 以下で一番高い上面。戻り値 {y, s} または null
+function groundBelow(x, z, yFrom, pad = 0) {
+  let best = null;
+  for (const s of World.solids) {
+    if (!overXZ(s, x, z, pad)) continue;
+    let top;
+    if (s.ramp) top = topAt(s, clamp(x, s.x0, s.x1), clamp(z, s.z0, s.z1));
+    else top = s.y1;
+    if (top <= yFrom + 1e-4 && (!best || top > best.y)) best = { y: top, s };
+  }
+  return best;
+}
+
+// 頭上の天井
+function ceilingAbove(x, z, yHead, yHeadNew, pad) {
+  let best = null;
+  for (const s of World.solids) {
+    if (!overXZ(s, x, z, -pad)) continue;
+    if (s.y0 >= yHead - 1e-3 && s.y0 < yHeadNew && (!best || s.y0 < best)) best = s.y0;
+  }
+  return best;
+}
+
+// 横方向の押し戻し。p:{x,y,z,r,h}。戻り値：一番強く当たった壁 {nx,nz,s} または null
+const STEP_H = 0.45;
+function pushOutXZ(p) {
+  let wall = null, wallPush = 0;
+  for (let iter = 0; iter < 2; iter++) {
+    for (const s of World.solids) {
+      if (p.y + p.h <= s.y0 + 0.02) continue;
+      let cx, cz;
+      if (s.type === 'cyl') {
+        const dx = p.x - s.x, dz = p.z - s.z;
+        const d = Math.hypot(dx, dz);
+        if (d >= s.r + p.r) continue;
+        if (p.y >= s.y1 - STEP_H) continue;
+        const nx = d > 1e-6 ? dx / d : 1, nz = d > 1e-6 ? dz / d : 0;
+        const push = s.r + p.r - d;
+        p.x += nx * push; p.z += nz * push;
+        if (push > wallPush) { wallPush = push; wall = { nx, nz, s }; }
+        continue;
+      }
+      cx = clamp(p.x, s.x0, s.x1); cz = clamp(p.z, s.z0, s.z1);
+      const top = s.ramp ? topAt(s, cx, cz) : s.y1;
+      if (p.y >= top - STEP_H) continue;
+      if (s.ramp && p.y + p.h <= s.y0) continue;
+      let dx = p.x - cx, dz = p.z - cz;
+      const d2 = dx * dx + dz * dz;
+      if (d2 >= p.r * p.r) continue;
+      let nx, nz, push;
+      if (d2 > 1e-10) {
+        const d = Math.sqrt(d2);
+        nx = dx / d; nz = dz / d; push = p.r - d;
+      } else {
+        // 中心が箱の中：一番近い辺へ出す
+        const l = p.x - s.x0, r = s.x1 - p.x, b = p.z - s.z0, f = s.z1 - p.z;
+        const m = Math.min(l, r, b, f);
+        if (m === l) { nx = -1; nz = 0; } else if (m === r) { nx = 1; nz = 0; } else if (m === b) { nx = 0; nz = -1; } else { nx = 0; nz = 1; }
+        push = m + p.r;
+      }
+      p.x += nx * push; p.z += nz * push;
+      if (push > wallPush) { wallPush = push; wall = { nx, nz, s }; }
+    }
+  }
+  return wall;
+}
+
+// 線分とワールドの交差（カメラのめり込み防止用）。戻り値 t（0〜1）
+function raycast(a, b) {
+  let tMin = 1;
+  const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  for (const s of World.solids) {
+    if (s.noCam) continue;
+    let x0, x1, z0, z1;
+    if (s.type === 'cyl') { x0 = s.x - s.r * 0.8; x1 = s.x + s.r * 0.8; z0 = s.z - s.r * 0.8; z1 = s.z + s.r * 0.8; }
+    else { x0 = s.x0; x1 = s.x1; z0 = s.z0; z1 = s.z1; }
+    const lo = [x0, s.y0, z0], hi = [x1, s.ramp ? (s.y0 + s.y1) / 2 : s.y1, z1];
+    let t0 = 0, t1 = tMin, hit = true;
+    for (let i = 0; i < 3; i++) {
+      if (Math.abs(d[i]) < 1e-9) {
+        if (a[i] < lo[i] || a[i] > hi[i]) { hit = false; break; }
+      } else {
+        let ta = (lo[i] - a[i]) / d[i], tb = (hi[i] - a[i]) / d[i];
+        if (ta > tb) [ta, tb] = [tb, ta];
+        t0 = Math.max(t0, ta); t1 = Math.min(t1, tb);
+        if (t0 > t1) { hit = false; break; }
+      }
+    }
+    if (hit && t0 > 0 && t0 < tMin) tMin = t0;
+  }
+  return tMin;
+}

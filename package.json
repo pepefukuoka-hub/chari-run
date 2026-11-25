@@ -1,1 +1,1 @@
-{"description":"チャリ走風の自転車ジャンプゲーム（ブラウザ）","name":"chari-run","private":true,"scripts":{"build":"node build.mjs"},"version":"1.0.0"}
+{"description":"ころんの空島アドベンチャー（ブラウザ3Dアクション）","name":"koron-sky","private":true,"scripts":{"build":"node build.mjs"},"version":"0.1.0"}
