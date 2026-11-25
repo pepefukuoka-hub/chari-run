@@ -2037,7 +2037,7 @@ function updatePlayer(dt) {
       const s = P.groundS, c = Math.cos(s.rotY), sn = Math.sin(s.rotY);
       const rx = P.x - s.cx, rz = P.z - s.cz;
       P.x = s.cx + rx * c + rz * sn; P.z = s.cz - rx * sn + rz * c;
-      P.yaw -= s.rotY;
+      P.yaw += s.rotY;
     }
   }
 
