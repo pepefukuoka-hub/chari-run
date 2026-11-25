@@ -3,6 +3,24 @@ function updateEntities(dt) {
   const px = P.x, py = P.y + 0.65, pz = P.z;
   const alive = P.state !== 'dead' && P.state !== 'win';
 
+  // 看板：近づくとヒント
+  for (const sg of Level.signs) {
+    const d = Math.hypot(sg.x - P.x, sg.z - P.z);
+    if (sg.armed && alive && d < 2.3 && Math.abs(P.y - sg.y) < 2) {
+      sg.armed = false;
+      Sound.play('select');
+      for (const l of sg.lines) Game.toast(l, 4.5);
+    } else if (!sg.armed && d > 6) sg.armed = true;
+  }
+  // 西の高台：印のついた敵を全部たおすと種
+  if (!Level.arenaDone) {
+    const arena = Level.enemies.filter((e) => e.arena);
+    if (arena.length && arena.every((e) => !e.alive)) {
+      Level.arenaDone = true;
+      revealSeedMsg(3, '高台の敵を ぜんぶ たおした！ ひかりの種が あらわれた！');
+    }
+  }
+
   // どんぐり
   for (const a of Level.acorns) {
     if (a.got) continue;
@@ -49,6 +67,7 @@ function updateEntities(dt) {
     }
     if (e.type === 'blob') updateBlob(e, dt);
     else if (e.type === 'spiky') updateSpiky(e, dt);
+    else if (e.type === 'hopper') updateHopper(e, dt);
   }
 }
 
@@ -87,12 +106,16 @@ function updateBlob(e, dt) {
   const g = groundBelow(e.x, e.z, e.y + 0.5, 0.3);
   if (g && e.y <= g.y) { e.y = g.y; e.vy = 0; if (g.s.dx || g.s.dz || g.s.dy) { e.x += g.s.dx; e.z += g.s.dz; } }
   if (e.y < World.killY) e.alive = false;
-  // 主人公との当たり
+  enemyTouch(e, 0.62, 1.2);
+}
+
+// 踏める敵と主人公の当たり（rad: 半径, hgt: 高さ）
+function enemyTouch(e, rad, hgt) {
   if (P.state === 'dead' || P.inv > 0.0 && P.state === 'hurt') return;
-  const r = 0.62 + P.r;
+  const r = rad + P.r;
   const pd = Math.hypot(P.x - e.x, P.z - e.z);
-  if (pd < r && P.y < e.y + 1.2 && P.y + P.h > e.y) {
-    const stomp = (P.vy < 0 && P.y > e.y + 0.55) || P.state === 'pound';
+  if (pd < r && P.y < e.y + hgt && P.y + P.h > e.y) {
+    const stomp = (P.vy < 0 && P.y > e.y + hgt * 0.45) || P.state === 'pound';
     const hitting = P.state === 'punch' && P.stateT < 0.25 || P.kickT > 0;
     if (stomp) {
       killEnemy(e, 'stomp');
@@ -109,6 +132,56 @@ function updateBlob(e, dt) {
   }
 }
 
+// ぴょんまる：止まって力をためて、主人公のほうへぴょんと跳ぶ。崖の外へは跳ばない
+function updateHopper(e, dt) {
+  e.t += dt;
+  e.squish = lerp(e.squish, 1, dt * 8);
+  const dx = P.x - e.x, dz = P.z - e.z;
+  const dist = Math.hypot(dx, dz);
+  const chase = dist < 10 && Math.abs(P.y - e.y) < 3 && P.state !== 'dead';
+  if (!e.air) {
+    e.st -= dt;
+    const want = chase ? Math.atan2(dx, dz) : e.yaw;
+    e.yaw += clamp(angDiff(e.yaw, want), -dt * 5, dt * 5);
+    if (e.st < 0.25) e.squish = Math.min(e.squish, 0.75); // ためる
+    if (e.st <= 0) {
+      let yaw = e.yaw;
+      const hx = e.hx - e.x, hz = e.hz - e.z;
+      if (!chase && Math.hypot(hx, hz) > e.range) yaw = Math.atan2(hx, hz);
+      else if (!chase) yaw = e.yaw + (Math.random() - 0.5) * 2.5;
+      const hop = chase ? 2.4 : 1.6;
+      const lx = e.x + Math.sin(yaw) * hop, lz = e.z + Math.cos(yaw) * hop;
+      const gl2 = groundBelow(lx, lz, e.y + 1.0, 0);
+      const far = Math.hypot(lx - e.hx, lz - e.hz) > e.range + 4;
+      if (gl2 && Math.abs(gl2.y - e.y) < 1.0 && !far) {
+        e.yaw = yaw;
+        e.air = true; e.vy = 9.5;
+        const T2 = (2 * 9.5) / 30;
+        e.vx = (Math.sin(yaw) * hop) / T2; e.vz = (Math.cos(yaw) * hop) / T2;
+        e.squish = 1.35;
+        e.st = 0.7 + Math.random() * 0.6;
+      } else {
+        e.yaw = Math.atan2(hx, hz) + (Math.random() - 0.5);
+        e.st = 0.4;
+      }
+    }
+    const g = groundBelow(e.x, e.z, e.y + 0.5, 0.3);
+    if (g) { e.y = g.y; e.x += g.s.dx; e.z += g.s.dz; }
+    else { e.air = true; e.vx = e.vz = 0; }
+  } else {
+    const prevY = e.y;
+    e.x += e.vx * dt; e.z += e.vz * dt;
+    e.vy -= 30 * dt;
+    e.y += e.vy * dt;
+    if (e.vy < 0) {
+      const g = groundBelow(e.x, e.z, prevY + 0.05, 0.3);
+      if (g && e.y <= g.y) { e.y = g.y; e.air = false; e.vx = e.vz = 0; e.squish = 0.6; }
+    }
+  }
+  if (e.y < World.killY) e.alive = false;
+  enemyTouch(e, 0.52, 1.1);
+}
+
 function killEnemy(e, how) {
   e.alive = false;
   e.deadT = 0;
@@ -119,6 +192,10 @@ function killEnemy(e, how) {
   // 倒すとどんぐりが出る
   Level.acorns.push({ x: e.x, y: e.y + 0.8, z: e.z, got: false, t: 0, bonus: true });
   Level.acornTotal++;
+  if (e.arena) {
+    const left = Level.enemies.filter((q) => q.arena && q.alive).length;
+    if (left > 0) Game.toast(`高台の敵 のこり ${left} ひき`, 2);
+  }
 }
 
 function updateSpiky(e, dt) {
@@ -139,8 +216,9 @@ function updateSpiky(e, dt) {
 
 // ヒップドロップの衝撃：近くの敵を倒す
 function poundShock(x, y, z) {
+  poundStakes(x, y, z);
   for (const e of Level.enemies) {
-    if (!e.alive || e.type !== 'blob') continue;
+    if (!e.alive || e.type === 'spiky') continue;
     if (Math.hypot(e.x - x, e.z - z) < 2.6 && Math.abs(e.y - y) < 1) killEnemy(e, 'pound');
   }
 }
@@ -165,10 +243,16 @@ function drawEntities() {
   }
   for (const e of Level.enemies) {
     if (!e.alive) {
-      if (e.deadT < 0.3 && e.type === 'blob') {
+      if (e.deadT < 0.3 && e.type !== 'spiky') {
         const k = 1 - e.deadT / 0.3;
-        drawMesh(Models.blob, T(e.x, e.y, e.z, 1 + (1 - k) * 0.6, k * 0.3 + 0.05, 1 + (1 - k) * 0.6, e.yaw));
+        drawMesh(e.type === 'blob' ? Models.blob : Models.hopper, T(e.x, e.y, e.z, 1 + (1 - k) * 0.6, k * 0.3 + 0.05, 1 + (1 - k) * 0.6, e.yaw));
       }
+      continue;
+    }
+    if (e.type === 'hopper') {
+      const sq = e.squish;
+      drawMesh(Models.hopper, T(e.x, e.y, e.z, 1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq), e.yaw));
+      drawShadow(e.x, e.y + 0.1, e.z, 0.6);
       continue;
     }
     if (e.type === 'blob') {
