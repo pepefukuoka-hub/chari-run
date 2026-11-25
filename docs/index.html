@@ -2473,7 +2473,7 @@ function camRay(ax, ay, az, bx, by, bz) {
   const sol = World.solids;
   for (let i = 0; i < sol.length; i++) {
     const s = sol[i];
-    if (s.noCam) continue;
+    if (s.noCam || s.off) continue; // 消えている足場には当たらない
     if (s.type === 'cyl') {
       if (s.r < 0.8) continue; // 木の幹などは無視（見えなくなっても一瞬）
       // XZ 平面で円と交差
@@ -2579,10 +2579,13 @@ function updateCamera(dt) {
   Cam.tz = lerp(Cam.tz, P.z + Cam.aheadZ, 1 - Math.exp(-dt * 9));
 
   // ---- 注視点（上下）：立った高さを基準に、ばねでなめらかに ----
-  if (P.grounded || P.state === 'dead') Cam.baseY = P.y;
+  if (P.state === 'dead') {
+    // たおれたら、その高さで止める（島をつきぬけて雲の下まで追いかけない）。落ちてたおれたときは雲の上から見る
+    Cam.baseY = Math.max(Cam.baseY, World.killY + 6);
+  }
+  else if (P.grounded) Cam.baseY = P.y;
   else if (P.y < Cam.baseY) Cam.baseY = P.y;                   // 下へ落ちるときはついていく
   else if (P.y > Cam.baseY + 3.2) Cam.baseY = P.y - 3.2;       // ばね・壁キックで高く上がるとき
-  if (P.state === 'dead') Cam.baseY = Math.max(P.y, World.killY + 6);
   const tyWant = Cam.baseY + 1.2;
   // 目標の動く速さ（落下中などは追いかけ遅れが出ないように足す。段差で一気に変わったときは使わない）
   let vWant = (tyWant - Cam.lastWant) / Math.max(dt, 1e-4);
@@ -4315,6 +4318,10 @@ const Game = {
     Sound.setDuck(0.15);
     Fx.burst(s.x, s.y + 0.7, s.z, [0.7, 1, 0.95], 30, 8);
     P.hp = P.maxHp;
+    // 空中のわざの途中で取っても、演出のあとに続きが残らないようにする
+    P.vy = 0; P.speed = 0; P.vx = P.vz = 0;
+    P.flip = 0; P.sideFlip = false; P.dive = false; P.longJump = false;
+    P.skidT = 0; P.slideT = 0; P.kickT = 0; P.wallSlide = false; P.wall = null; P.punchN = 0;
     if (this.seeds >= Level.seedTotal) {
       this.state = 'clear'; this.stT = 0; this.menuSel = 0;
       P.state = 'win'; P.vx = P.vz = 0;
@@ -4353,6 +4360,7 @@ const Game = {
 // 敵やアイテムを初期状態に戻す（ステージを作り直す）
 function buildLevelState() {
   buildLevel();
+  Fx.list.length = 0; // 前のプレイの粒が止まったまま残らないように
 }
 
 function fmtTime(t) {
@@ -4495,7 +4503,10 @@ function update(dt) {
     updateCamera(dt);
     if (Game.state === 'seed' && Game.stT > 2.8) {
       Cam.override = null;
-      P.state = 'ground';
+      // 空中で取ったときは落ちるところから再開（'ground' のままだと重力がかからず浮き続ける）
+      if (P.grounded) P.state = 'ground';
+      else { P.state = 'air'; P.airT = 0; P.coyote = 0; P.jumpHeld = false; P.fallFrom = P.y; }
+      P.stateT = 0;
       Game.state = 'play';
       Sound.setDuck(1);
       Game.toast(`ひかりの種 ${Game.seeds} / ${Level.seedTotal}`, 2.5);
@@ -4757,10 +4768,15 @@ function drawHud() {
   // ---- タイム ----
   const touchUI = Input.touchMode && (Game.state === 'play' || Game.state === 'pause');
   const tx = touchUI ? (Input.btns.camera ? Input.btns.camera.x - 32 : W - 130) : W - S.r - 14;
-  txt(fmtTime(Game.playTime), tx, T0 + (hs + 14) / 2, fs, '#fff', 'right');
+  const tStr = fmtTime(Game.playTime);
+  setFont(fs);
+  // せまい横画面では種の表示とぶつかるので、1段下へ
+  const tLow = !portrait && tx - hud.measureText(tStr).width < seedX + sw + 6;
+  txt(tStr, tLow ? W - S.r - 14 : tx, tLow ? T0 + hs + 14 + 20 : T0 + (hs + 14) / 2, fs, '#fff', 'right');
 
   // ---- メッセージ ----
-  const showToast = Game.state === 'play' || Game.state === 'seed';
+  // 種ゲットの演出中は、見出しと重なるので出さない
+  const showToast = Game.state === 'play';
   for (let i = 0; showToast && i < Game.toasts.length; i++) {
     const t = Game.toasts[i];
     const a = Math.min(1, t.t * 5, (t.dur - t.t) * 2);
@@ -4796,14 +4812,16 @@ function drawHud() {
     const land = W > H;
     const items = MENUS.pause;
     const menuH = items.length * (small ? 44 : 52) + 10;
-    if (land && W > 640) {
+    if (land && W > 540) {
       // 横長：左に進み具合、右にメニュー
       txt('ポーズ', W * 0.3, H * 0.2, small ? 30 : 40, '#fff', 'center');
       drawProgress(W * 0.3, H * 0.2 + 44, fs);
       drawMenu(items, W * 0.68, Math.max(S.t + 16, (H - menuH) / 2), W * 0.6, H);
     } else {
-      txt('ポーズ', W / 2, S.t + 40, small ? 28 : 40, '#fff', 'center');
-      const y = drawProgress(W / 2, S.t + 76, fs * 0.85, true);
+      // 体力・どんぐり・種の表示の下から並べる（縦向きでは種の表示が左上の3段目にある）
+      const top = (portrait ? seedY : T0) + hs + 14 + 10;
+      txt('ポーズ', W / 2, top + 20, small ? 28 : 40, '#fff', 'center');
+      const y = drawProgress(W / 2, top + 56, fs * 0.85, true);
       drawMenu(items, W / 2, Math.max(y + 10, H - S.b - menuH - 10), W, H);
     }
   }
@@ -4828,8 +4846,11 @@ function drawProgress(cx, y, fs, compact) {
     return y + fs + 8;
   }
   let yy = y;
+  // 画面の高さが足りないときは種の名前を省く
+  const got = Level.seeds.length - left;
+  const names = y + got * (fs + 6) + fs * 2 + 30 < hudH - Input.safe.b;
   for (const s of Level.seeds) {
-    if (!s.got) continue;
+    if (!s.got || !names) continue;
     txt('◆ ' + s.name, cx, yy, fs * 0.85, '#9cfff0', 'center'); yy += fs + 6;
   }
   txt('のこり ' + left + ' こ　どんぐり ' + Game.acorns + ' こ', cx, yy + 6, fs * 0.85, '#fff', 'center');
@@ -4876,7 +4897,8 @@ function drawSeedGet(W, H, fs) {
   const t = Game.stT;
   const k = Math.min(1, t * 3);
   const bounce = 1 + Math.sin(Math.min(1, t * 2.5) * Math.PI) * 0.25;
-  const cy = H * 0.22;
+  // 縦向きでは左上の種の表示と重ならないように少し下げる
+  const cy = H > W ? Math.max(H * 0.22, Input.safe.t + 225) : H * 0.22;
   // 光の筋
   hud.save();
   hud.translate(W / 2, cy);
