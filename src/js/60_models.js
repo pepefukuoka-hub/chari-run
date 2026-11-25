@@ -224,27 +224,86 @@ function buildModels() {
 }
 
 // ---------- ころんを描く ----------
-// P の状態を読んで、姿勢・表情・マフラーのなびきを決める
+// P の状態を読んで、姿勢・表情・マフラーのなびきを決める。
+// ポーズが切り替わるときは、前のポーズから短い時間で混ぜてつなぐ（PoseMix）。
+// drawPlayer は影用（R.pass === 'shadow'）と本番で1フレームに2回呼ばれるので、
+// 混ぜ具合や「直前に何をしたか」の記録は本番の描画のときだけ進める。
+const POSE_N = 24; // 手(3×2) 足(4×2) と、体の角度・位置・耳 10こ
+const PoseMix = {
+  key: '',                         // いまのポーズの名前
+  from: new Float32Array(POSE_N),  // 切り替わる直前に描いていたポーズ
+  last: new Float32Array(POSE_N),  // 前のフレームに描いたポーズ
+  cur: new Float32Array(POSE_N),   // 作業用
+  fade: 1, dur: 0.1,
+  lastNow: 0,
+  wallSide: 1,                     // 壁ずり落ち：壁が体の右(+1)か左(-1)か
+  wasWall: false, wallKickT: 9,    // 壁キックしてからの時間
+  wasPoundT: 0, poundJump: false,  // ヒップドロップ後の大ジャンプ中
+  sideFrom: Math.PI,               // くるりんジャンプ：もとの向きと新しい向きの差
+};
+// ポーズごとのつなぎ時間（秒）。書いていないものは 0.1
+const POSE_DUR = {
+  skid: 0.05, side: 0.06, dive: 0.07, slide: 0.06, bslide: 0.12, p1: 0.04, p2: 0.04, p3: 0.05,
+  kick: 0.04, wall: 0.1, wkick: 0.06, up: 0.05, ground: 0.08, pland: 0.04, pjump: 0.06, pspin: 0.05, pound: 0.05,
+};
+function poseDur(from, to) {
+  if (from === 'slide' && to === 'ground') return 0.22; // おなかすべりから、よいしょと起きあがる
+  if (from === 'skid' && to === 'ground') return 0.14;
+  if (from === 'wall') return 0.08;
+  return POSE_DUR[to] || 0.1;
+}
+
 function drawPlayer() {
   if (P.inv > 0 && P.state !== 'dead' && Math.floor(P.inv * 14) % 2 === 0) return;
   const shadowPass = R.pass === 'shadow';
+  const PM = PoseMix;
   const t = Game.time;
   const st = P.state;
   const air = !P.grounded && st !== 'win' && st !== 'dead';
+  // 本番の描画のときだけ時間を進める（影用では進めない）
+  let dt = 0, snap = PM.key === '';
+  if (!shadowPass) {
+    const now = performance.now() / 1000;
+    const gap = now - PM.lastNow;
+    if (gap > 0.5) snap = true; // しばらく描いていなかった（タイトルなど）
+    dt = clamp(gap, 0, 0.1);
+    PM.lastNow = now;
+    // ---- 直前にしたことを覚える ----
+    // 壁キック：壁にくっついていた次の瞬間に、上へはね返った
+    if (!air) PM.wallKickT = 9;
+    else if (PM.wasWall && !P.wall && P.vy > 8 && P.airT < 0.08) PM.wallKickT = 0;
+    else PM.wallKickT += dt;
+    PM.wasWall = air && !!P.wall;
+    // ヒップドロップ着地の直後に跳んだ
+    if (!air) PM.poundJump = false;
+    else if (PM.wasPoundT > 0 && P.flip && P.vy > 10) PM.poundJump = true;
+    PM.wasPoundT = P.grounded ? P.poundT : 0;
+    // ブレーキ中：くるりんジャンプしたときに、もとの向きから回って見せるため
+    if (P.skidT > 0) PM.sideFrom = -angDiff(P.yaw, P.skidYaw) || Math.PI;
+  }
   const ph = P.anim;
   const hsp = Math.hypot(P.vx, P.vz);
-  const run = st === 'ground' && Math.abs(P.speed) > 0.3 ? clamp(Math.abs(P.speed) / PL.RUN, 0.25, 1) : 0;
-  const curling = air && P.flip && Math.abs(P.flip) < TAU * 0.92;
+  // 崖から歩いて出た直後（コヨーテ時間）は、まだ走りの形のまま
+  const coyote = air && st === 'air' && P.coyote > 0 && P.vy <= 0 && !P.flip;
+  const groundLike = st === 'ground' || st === 'punch' || coyote;
+  const run = groundLike && Math.abs(P.speed) > 0.3 ? clamp(Math.abs(P.speed) / PL.RUN, 0.25, 1) : 0;
+  const flipping = air && P.flip && Math.abs(P.flip) < TAU * 0.92;
+  const curling = flipping && !P.sideFlip && !PM.poundJump;
   const poundSpin = st === 'pound' && P.stateT < 0.22;
 
   // ---- 体の姿勢 ----
   let lean = 0, roll = 0, twist = 0, bob = 0, sq = P.squash;
+  let pitch = 0;          // 体のまん中を軸に前へ倒す（ダイブ・おなかすべり）
+  let yawOff = 0;         // 向きのずらし（壁ずり落ち）
+  let offX = 0, offZ = 0; // 体の位置のずらし（壁から少しはなす）
+  let spin = 0;           // その場での1回転（まわしげり）。1回転で元にもどるので混ぜない
   let eyes = 'open', mouth = 'smile', earX = 0, earZ = 0;
+  let key = 'ground';
   // 手足の位置（side=+1 が右）
   const hands = [[-0.6, 0.56, 0.04], [0.6, 0.56, 0.04]];
   const feet = [[-0.23, 0, 0, 0], [0.23, 0, 0, 0]]; // x, y, z, 角度
 
-  if (st === 'ground' || st === 'punch') {
+  if (groundLike) {
     // 呼吸
     sq *= 1 + Math.sin(t * 3.2) * 0.022;
     hands[0][1] += Math.sin(t * 3.2) * 0.015; hands[1][1] += Math.sin(t * 3.2) * 0.015;
@@ -270,10 +329,57 @@ function drawPlayer() {
       const tw = (t % 4.3) < 0.18 ? Math.sin((t % 4.3) / 0.18 * Math.PI) * 0.3 : 0;
       earZ = tw;
     }
-    if (P.stateT < 0 && P.landT > 0.5) { /* ヒップドロップ着地直後 */ sq *= 0.92; }
+    if (coyote) { mouth = 'open'; hands[0][1] += 0.12; hands[1][1] += 0.12; } // あれっ、足もとがない
   }
-  if (air && st !== 'pound') {
+  if (st === 'ground') {
+    if (P.skidT > 0) {
+      // ブレーキ：前に出した足でふんばって、体は後ろへのけぞる。手はばたばた
+      key = 'skid';
+      const wob = Math.sin(t * 38) * 0.06;
+      lean = -0.42; bob = -0.02; sq *= 0.93;
+      roll = wob * 0.5;
+      twist = clamp(angDiff(P.yaw, P.skidYaw), -1, 1) * 0.22; // 行きたい方へ少し顔を向ける
+      feet[0] = [-0.27, -0.17, 0.4, -0.2];  // 前の足：つま先を上げて地面をける
+      feet[1] = [0.25, 0.02, -0.02, 0.42];  // 後ろの足：ぺたっと地面に
+      hands[0] = [-0.74, 0.92 + wob, -0.2]; hands[1] = [0.74, 0.92 - wob, -0.2];
+      eyes = 'hurt'; mouth = 'open'; earX = 0.8; earZ = 0.15;
+    } else if (P.slideT > 0) {
+      // おなかすべり：腹ばいで両手を前へ、足は後ろでぱたぱた
+      key = 'slide';
+      pitch = 1.25;
+      sq = lerp(sq, 1, 0.6);
+      roll = Math.sin(t * 16) * 0.05;
+      hands[0] = [-0.4, 1.2, 0.56]; hands[1] = [0.4, 1.2, 0.56];
+      for (let i = 0; i < 2; i++) {
+        const sd = i ? 1 : -1;
+        const kk = Math.sin(t * 14 + i * Math.PI); // ひざを曲げて、足のうらを上に向けてぱたぱた
+        feet[i] = [sd * 0.2, -0.02 + kk * 0.04, -0.32 - kk * 0.06, 1.85 + kk * 0.4];
+      }
+      eyes = 'happy'; mouth = 'open'; earX = -0.9;
+    } else if (P.crouching && P.groundS && P.groundS.ramp && P.speed > 3) {
+      // しゃがんで坂すべり：おしりですべって、両手をあげる
+      key = 'bslide';
+      lean = -0.28; sq = Math.min(sq, 0.82);
+      roll = Math.sin(t * 9) * 0.05;
+      feet[0] = [-0.22, -0.06, 0.36, -0.45]; feet[1] = [0.22, -0.06, 0.36, -0.45];
+      hands[0] = [-0.62, 1.0, 0.02]; hands[1] = [0.62, 1.0, 0.02];
+      eyes = 'happy'; mouth = 'open'; earX = -0.55;
+    } else if (P.poundT > 0) {
+      // ヒップドロップの着地：足をひらいて、どすん
+      key = 'pland';
+      feet[0] = [-0.33, 0, 0.06, 0]; feet[1] = [0.33, 0, 0.06, 0];
+      hands[0] = [-0.7, 0.4, 0.14]; hands[1] = [0.7, 0.4, 0.14];
+      eyes = 'hurt'; mouth = 'open'; earX = 0.6; earZ = 0.25;
+    } else if (P.crouching) {
+      key = 'crouch';
+      sq = Math.min(sq, 0.74);
+      hands[0] = [-0.55, 0.34, 0.2]; hands[1] = [0.55, 0.34, 0.2];
+      earX = 0.7;
+    }
+  }
+  if (air && st !== 'pound' && !coyote) {
     const up = P.vy > 0;
+    key = up ? 'up' : 'down';
     sq *= 1 + clamp(P.vy * 0.006, -0.06, 0.1);
     mouth = up ? 'open' : 'smile';
     if (up) {
@@ -289,36 +395,92 @@ function drawPlayer() {
       feet[0] = [-0.24, 0.02, 0.08, 0.3]; feet[1] = [0.24, 0.06, -0.04, -0.2];
       earX = 0.22;
     }
-    if (P.longJump) {
+    if (P.longJump && !P.dive) {
       // 幅とび：体を前に倒し、手を前に伸ばす
+      key = 'long';
       lean = 1.15;
       hands[0] = [-0.42, 0.75, 0.42]; hands[1] = [0.42, 0.75, 0.42];
       feet[0] = [-0.22, 0.12, -0.25, 0.9]; feet[1] = [0.22, 0.12, -0.25, 0.9];
       earX = -0.6;
       mouth = 'open';
     }
+    if (PM.wallKickT < 0.32 && P.vy > 0 && !flipping) {
+      // 壁キックの直後：手を前に、足は後ろへけり出した形で、壁からぴょーん
+      key = 'wkick';
+      lean = 0.3 * (1 - PM.wallKickT / 0.32);
+      hands[0] = [-0.6, 1.05, 0.22]; hands[1] = [0.6, 1.05, 0.22];
+      feet[0] = [-0.2, 0.16, -0.34, 0.95]; feet[1] = [0.2, 0.06, -0.26, 0.7];
+      eyes = 'open'; mouth = 'open'; earX = -0.7;
+    }
     if (curling) {
       // 宙返り中は丸くなる
+      key = 'curl';
       hands[0] = [-0.45, 0.6, 0.38]; hands[1] = [0.45, 0.6, 0.38];
       feet[0] = [-0.2, 0.22, 0.25, -1.0]; feet[1] = [0.2, 0.22, 0.25, -1.0];
       eyes = 'happy';
       earX = -0.5;
+    } else if (flipping && P.sideFlip) {
+      // くるりんジャンプ：手足を大の字に広げて、横向きにくるっと（回転は下の行列で）
+      key = 'side';
+      hands[0] = [-0.8, 0.98, 0.04]; hands[1] = [0.8, 0.98, 0.04];
+      feet[0] = [-0.34, 0.03, 0, 0.15]; feet[1] = [0.34, 0.03, 0, 0.15];
+      eyes = 'happy'; mouth = 'open'; earX = -0.2; earZ = 0.35;
+    } else if (flipping && PM.poundJump) {
+      // ヒップドロップ後の大ジャンプ：両手をそろえてまっすぐ上へ、きりもみ回転
+      key = 'pjump';
+      sq *= 1.08;
+      hands[0] = [-0.22, 1.33, 0.03]; hands[1] = [0.22, 1.33, 0.03];
+      feet[0] = [-0.1, -0.05, 0, 0.4]; feet[1] = [0.1, -0.05, 0, 0.4];
+      eyes = 'happy'; mouth = 'open'; earX = -0.35;
     }
-    if (P.kickT > 0) {
-      // 空中キック
-      feet[1] = [0.2, 0.42, 0.5, -1.2];
-      hands[0] = [-0.62, 0.8, -0.1]; hands[1] = [0.55, 0.7, -0.15];
-      lean = -0.25;
-      eyes = 'hurt';
+    if (P.kickT > 0 && !P.dive) {
+      // 空中キック：片足をぴんと前へ、体は少し後ろへ
+      key = 'kick';
+      feet[1] = [0.18, 0.4, 0.55, -1.35]; feet[0] = [-0.2, 0.2, -0.12, 0.5];
+      hands[0] = [-0.66, 0.85, -0.12]; hands[1] = [0.6, 0.72, -0.2];
+      lean = -0.3;
+      eyes = 'hurt'; mouth = 'open'; earX = 0.4;
+    }
+    if (P.dive) {
+      // ダイブ：体を前へ倒し、両手を頭の先へのばして飛びこむ
+      key = 'dive';
+      lean = 0;
+      pitch = 1.0 + clamp(-P.vy * 0.025, -0.15, 0.25);
+      sq = lerp(sq, 1.06, 0.7);
+      hands[0] = [-0.32, 1.36, 0.34]; hands[1] = [0.32, 1.36, 0.34];
+      feet[0] = [-0.2, 0.04, -0.16, 1.1]; feet[1] = [0.2, 0.1, -0.12, 1.25];
+      eyes = 'open'; mouth = 'open'; earX = -0.9;
+    }
+    if (P.wallSlide && P.wall) {
+      // 壁ずり落ち：体を横向きにして壁に手と足をつき、ずずずと落ちる
+      key = 'wall';
+      const W = Math.atan2(-P.wall.nx, -P.wall.nz); // 壁の方向
+      if (!shadowPass && PM.key !== 'wall') PM.wallSide = angDiff(P.yaw, W) >= 0 ? 1 : -1;
+      const sd = PM.wallSide, A = 1.1;
+      yawOff = angDiff(P.yaw, W - sd * A);
+      const wx = sd * Math.sin(A), wz = Math.cos(A); // 体から見た壁の方向
+      offX = -wx * 0.16; offZ = -wz * 0.16;
+      const jit = Math.sin(t * 34) * 0.012;
+      bob = jit;
+      lean = -0.1; roll = sd * 0.12;
+      const iw = sd > 0 ? 1 : 0;
+      hands[iw] = [wx * 0.58, 1.02 + jit, wz * 0.58];
+      hands[1 - iw] = [-sd * 0.7, 0.74, 0.16];
+      feet[iw] = [wx * 0.44, 0.3, wz * 0.44, -0.4];
+      feet[1 - iw] = [-sd * 0.2, -0.02, -0.04, 0.25];
+      eyes = 'hurt'; mouth = 'smile';
+      earX = 0.35 + Math.sin(t * 25) * 0.1;
     }
   }
   if (st === 'pound') {
     if (poundSpin) {
+      key = 'pspin';
       hands[0] = [-0.45, 0.62, 0.36]; hands[1] = [0.45, 0.62, 0.36];
       feet[0] = [-0.2, 0.24, 0.26, -1.0]; feet[1] = [0.2, 0.24, 0.26, -1.0];
       eyes = 'happy';
     } else {
       // 急降下：足をそろえて下へ、手は上へ
+      key = 'pound';
       sq *= 1.1;
       hands[0] = [-0.42, 1.08, -0.05]; hands[1] = [0.42, 1.08, -0.05];
       feet[0] = [-0.13, -0.04, 0, 0.15]; feet[1] = [0.13, -0.04, 0, 0.15];
@@ -327,15 +489,38 @@ function drawPlayer() {
     }
   }
   if (st === 'punch') {
-    const k = Math.sin(clamp(P.stateT / 0.32, 0, 1) * Math.PI);
-    hands[1] = [0.28 - k * 0.08, 0.66, 0.12 + k * 0.62];
-    hands[0] = [-0.55, 0.58, -0.18 * k];
-    twist = -k * 0.45;
-    lean = 0.22 * k;
+    const n = P.punchN || 1;
     mouth = 'open';
-    feet[0][2] = -0.12 * k; feet[1][2] = 0.14 * k;
+    if (n < 3) {
+      // 1発目は右手、2発目は左手のストレート。すばやく出して、ゆっくりもどす
+      key = 'p' + n;
+      const s = P.stateT, T0 = 0.07;
+      const k = s < T0 ? smooth(s / T0) : 1 - smooth(clamp((s - T0) / 0.25, 0, 1)) * 0.8;
+      const sd = n === 1 ? 1 : -1;
+      const iP = n === 1 ? 1 : 0, iB = 1 - iP;
+      hands[iP] = [sd * (0.3 - k * 0.1), 0.68, 0.14 + k * 0.64];
+      hands[iB] = [-sd * 0.56, 0.6, -0.05 - 0.2 * k];
+      twist = -sd * k * 0.5;
+      lean = 0.2 * k;
+      roll = sd * 0.04 * k;
+      feet[iB][2] = 0.16 * k; feet[iP][2] = -0.12 * k;
+      if (n === 2) eyes = 'hurt';
+    } else {
+      // 3発目：まわしげり。その場で1回転しながら、右足を横へのばす
+      key = 'p3';
+      const u = clamp(P.stateT / 0.42, 0, 1);
+      spin = -smooth(clamp(u / 0.78, 0, 1)) * TAU;
+      const ext = Math.sin(clamp(u / 0.85, 0, 1) * Math.PI);
+      feet[1] = [0.28 + ext * 0.56, 0.06 + ext * 0.4, 0.04 + ext * 0.12, -0.2 - ext * 0.5];
+      feet[0] = [-0.14, 0, 0.02, 0.05];
+      hands[0] = [-0.48, 0.78, 0.28]; hands[1] = [0.58, 0.84, -0.18];
+      lean = -0.08 * ext; roll = ext * 0.3; bob = ext * 0.1;
+      twist = 0;
+      eyes = 'hurt'; earX = 0.3 * ext; earZ = 0.3 * ext;
+    }
   }
   if (st === 'hurt' || st === 'dead') {
+    key = 'hurt';
     const fl = Math.sin(t * 30) * 0.06;
     lean = -0.35;
     hands[0] = [-0.72, 0.95 + fl, 0.05]; hands[1] = [0.72, 0.95 - fl, 0.05];
@@ -344,6 +529,7 @@ function drawPlayer() {
   }
   if (st === 'win') {
     // 勝利ポーズ：ぴょんぴょん跳ねて、両手を上げる
+    key = 'win';
     const hop = Math.abs(Math.sin(ph * 0.75));
     bob = hop * 0.32;
     sq *= 1 + (hop - 0.5) * 0.14;
@@ -354,28 +540,54 @@ function drawPlayer() {
     roll = Math.sin(ph * 0.75) * 0.08;
     earX = -0.2 * hop; earZ = 0.15 * hop;
   }
-  if (P.crouching) {
-    sq = Math.min(sq, 0.74);
-    hands[0] = [-0.55, 0.34, 0.2]; hands[1] = [0.55, 0.34, 0.2];
-    earX = 0.7;
+
+  // ---- 前のポーズからなめらかにつなぐ ----
+  {
+    const c = PM.cur;
+    c.set(hands[0], 0); c.set(hands[1], 3); c.set(feet[0], 6); c.set(feet[1], 10);
+    c[14] = lean; c[15] = roll; c[16] = twist; c[17] = bob; c[18] = pitch;
+    c[19] = yawOff; c[20] = offX; c[21] = offZ; c[22] = earX; c[23] = earZ;
+    if (!shadowPass) {
+      if (snap) { PM.key = key; PM.fade = 1; }
+      else if (key !== PM.key) { PM.dur = poseDur(PM.key, key); PM.key = key; PM.from.set(PM.last); PM.fade = 0; }
+      PM.fade = Math.min(1, PM.fade + dt / PM.dur);
+    }
+    if (PM.fade < 1) {
+      const w = smooth(PM.fade), f = PM.from;
+      for (let i = 0; i < POSE_N; i++) c[i] = f[i] + (c[i] - f[i]) * w;
+    }
+    if (!shadowPass) PM.last.set(c);
+    for (let i = 0; i < 3; i++) { hands[0][i] = c[i]; hands[1][i] = c[3 + i]; }
+    for (let i = 0; i < 4; i++) { feet[0][i] = c[6 + i]; feet[1][i] = c[10 + i]; }
+    lean = c[14]; roll = c[15]; twist = c[16]; bob = c[17]; pitch = c[18];
+    yawOff = c[19]; offX = c[20]; offZ = c[21]; earX = c[22]; earZ = c[23];
   }
 
   // ---- 体の行列 ----
   const m = M4.ident();
   M4.translate(m, P.x, P.y, P.z);
-  M4.rotY(m, P.yaw);
+  M4.rotY(m, P.yaw + yawOff + spin);
   if (P.flip && st !== 'dead') {
     // 宙返り：回りすぎないよう1回転でとめ、終わりぎわはゆっくり
     const a = Math.min(Math.abs(P.flip), TAU);
     const e = a < TAU * 0.85 ? a : TAU * 0.85 + (a - TAU * 0.85) * 0.6 + smooth((a - TAU * 0.85) / (TAU * 0.15)) * TAU * 0.06;
     M4.translate(m, 0, 0.65, 0);
-    M4.rotX(m, Math.sign(P.flip) * e);
+    if (P.sideFlip) {
+      // くるりんジャンプ：もとの向きからくるっと振り向きつつ、横に1回転
+      M4.rotY(m, PM.sideFrom * (1 - smooth(clamp(a / (TAU * 0.6), 0, 1))));
+      M4.rotZ(m, (PM.sideFrom >= 0 ? 1 : -1) * e);
+    } else if (PM.poundJump) {
+      M4.rotY(m, -e); // きりもみ
+    } else {
+      M4.rotX(m, Math.sign(P.flip) * e);
+    }
     M4.translate(m, 0, -0.65, 0);
   }
   if (st === 'dead') { M4.translate(m, 0, 0.7, 0); M4.rotZ(m, P.flip); M4.translate(m, 0, -0.7, 0); }
-  M4.translate(m, 0, bob, 0);
+  M4.translate(m, offX, bob, offZ);
   if (twist) M4.rotY(m, twist);
   if (lean) M4.rotX(m, lean);
+  if (pitch) { M4.translate(m, 0, 0.6, 0); M4.rotX(m, pitch); M4.translate(m, 0, -0.6, 0); }
   if (roll) M4.rotZ(m, roll);
   // つぶれ・伸び（体積を保つように横も変える）
   const sxz = 1 / Math.sqrt(sq);
