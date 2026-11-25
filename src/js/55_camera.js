@@ -45,7 +45,7 @@ function camRay(ax, ay, az, bx, by, bz) {
   const sol = World.solids;
   for (let i = 0; i < sol.length; i++) {
     const s = sol[i];
-    if (s.noCam) continue;
+    if (s.noCam || s.off) continue; // 消えている足場には当たらない
     if (s.type === 'cyl') {
       if (s.r < 0.8) continue; // 木の幹などは無視（見えなくなっても一瞬）
       // XZ 平面で円と交差
@@ -151,10 +151,13 @@ function updateCamera(dt) {
   Cam.tz = lerp(Cam.tz, P.z + Cam.aheadZ, 1 - Math.exp(-dt * 9));
 
   // ---- 注視点（上下）：立った高さを基準に、ばねでなめらかに ----
-  if (P.grounded || P.state === 'dead') Cam.baseY = P.y;
+  if (P.state === 'dead') {
+    // たおれたら、その高さで止める（島をつきぬけて雲の下まで追いかけない）。落ちてたおれたときは雲の上から見る
+    Cam.baseY = Math.max(Cam.baseY, World.killY + 6);
+  }
+  else if (P.grounded) Cam.baseY = P.y;
   else if (P.y < Cam.baseY) Cam.baseY = P.y;                   // 下へ落ちるときはついていく
   else if (P.y > Cam.baseY + 3.2) Cam.baseY = P.y - 3.2;       // ばね・壁キックで高く上がるとき
-  if (P.state === 'dead') Cam.baseY = Math.max(P.y, World.killY + 6);
   const tyWant = Cam.baseY + 1.2;
   // 目標の動く速さ（落下中などは追いかけ遅れが出ないように足す。段差で一気に変わったときは使わない）
   let vWant = (tyWant - Cam.lastWant) / Math.max(dt, 1e-4);
