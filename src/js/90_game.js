@@ -13,26 +13,41 @@ const Game = {
   lastSeed: null,
   best: Number(localStorage.getItem('koron-best') || 0),
   fps: 60,
+  cpuMs: 0,         // 1フレームの計算時間（描画をのぞく）
+  menuSel: 0,
+  help: false,      // 操作説明を表示中
+  hurtFlash: 0,
+  acornPop: 0, shownAcorns: 0,
+  heartShake: 0, shownHp: 3,
+  newRecord: false,
+  portraitHintT: 0,
 
   newGame() {
     buildLevelState();
-    this.acorns = 0; this.seeds = 0; this.playTime = 0;
-    P.hp = P.maxHp;
+    this.acorns = 0; this.seeds = 0; this.playTime = 0; this.shownAcorns = 0;
+    P.hp = P.maxHp; this.shownHp = P.maxHp;
     const s = Level.start;
     playerReset(s.x, s.y, s.z, s.yaw);
     camReset();
-    this.state = 'play'; this.stT = 0;
+    this.state = 'play'; this.stT = 0; this.help = false;
+    this.toasts.length = 0;
     this.toast('ひかりの種を ' + Level.seedTotal + ' こ 集めよう！', 4);
+    this.portraitHintT = 6;
+    Sound.setDuck(1);
   },
-  toast(msg, dur = 2.6) { this.toasts.push({ msg, t: 0, dur }); if (this.toasts.length > 3) this.toasts.shift(); },
+  toast(msg, dur = 2.6) {
+    if (this.toasts.length >= 3) this.toasts.shift();
+    this.toasts.push({ msg, t: 0, dur });
+  },
   getSeed(s) {
     this.seeds++;
     this.lastSeed = s;
     Sound.play('seed');
+    Sound.setDuck(0.15);
     Fx.burst(s.x, s.y + 0.7, s.z, [0.7, 1, 0.95], 30, 8);
     P.hp = P.maxHp;
     if (this.seeds >= Level.seedTotal) {
-      this.state = 'clear'; this.stT = 0;
+      this.state = 'clear'; this.stT = 0; this.menuSel = 0;
       P.state = 'win'; P.vx = P.vz = 0;
       setTimeout(() => Sound.play('clear'), 600);
       const t = this.playTime;
@@ -55,13 +70,14 @@ const Game = {
     if (P.state === 'dead') return;
     Sound.play('fall');
     P.hp -= 1;
+    this.hurtFlash = 1;
     if (P.hp <= 0) { playerDie(); return; }
     playerReset(P.safe[0], P.safe[1] + 0.2, P.safe[2], P.yaw);
     P.inv = 2;
     camReset();
     this.toast('落っこちた！', 1.6);
   },
-  onDeath() { this.state = 'dead'; this.stT = 0; },
+  onDeath() { this.state = 'dead'; this.stT = 0; this.menuSel = 0; Sound.play('over'); Sound.setDuck(0.3); },
   onPound(x, y, z) { poundShock(x, y, z); },
 };
 
@@ -72,28 +88,125 @@ function buildLevelState() {
 
 function fmtTime(t) {
   const m = Math.floor(t / 60), s = Math.floor(t % 60), cs = Math.floor((t * 100) % 100);
-  return `${m}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+  return m + ':' + (s < 10 ? '0' : '') + s + '.' + (cs < 10 ? '0' : '') + cs;
+}
+
+// ---------------- メニュー ----------------
+const onOff = (b) => (b ? 'ON' : 'OFF');
+const MENUS = {
+  title: [
+    { id: 'start', label: () => 'はじめる', big: true },
+    { id: 'help', label: () => 'あそびかた' },
+  ],
+  pause: [
+    { id: 'resume', label: () => 'つづける', big: true },
+    { id: 'restart', label: () => 'はじめから' },
+    { id: 'sfx', label: () => 'こうかおん：' + onOff(Sound.sfxOn) },
+    { id: 'bgm', label: () => 'BGM：' + onOff(Sound.bgmOn) },
+    { id: 'help', label: () => 'そうさ説明' },
+    { id: 'title', label: () => 'タイトルへ' },
+  ],
+  dead: [
+    { id: 'retry', label: () => 'スタート地点から つづける', big: true },
+    { id: 'title', label: () => 'タイトルへ' },
+  ],
+  clear: [
+    { id: 'again', label: () => 'もういちど あそぶ', big: true },
+    { id: 'title', label: () => 'タイトルへ' },
+  ],
+};
+// 画面に描いたボタンの位置（タップ判定用。毎フレーム中身だけ書きかえる）
+const menuRects = [];
+for (let i = 0; i < 8; i++) menuRects.push({ x: 0, y: 0, w: 0, h: 0, on: false });
+
+// メニュー操作。決まったら項目の id を返す
+function menuInput(items) {
+  const n = items.length;
+  if (Input.upP) { Game.menuSel = (Game.menuSel + n - 1) % n; Sound.play('cursor'); }
+  if (Input.downP) { Game.menuSel = (Game.menuSel + 1) % n; Sound.play('cursor'); }
+  Game.menuSel = clamp(Game.menuSel, 0, n - 1);
+  if (Input.tapP) {
+    for (let i = 0; i < n; i++) {
+      const r = menuRects[i];
+      if (r.on && Input.tapX >= r.x && Input.tapX <= r.x + r.w && Input.tapY >= r.y && Input.tapY <= r.y + r.h) {
+        Game.menuSel = i;
+        Sound.play('select');
+        return items[i].id;
+      }
+    }
+  }
+  if (Input.okP) { Sound.play('select'); return items[Game.menuSel].id; }
+  return null;
+}
+
+function goTitle() {
+  Cam.override = null;
+  Game.state = 'title'; Game.stT = 0; Game.menuSel = 0; Game.help = false;
+  buildLevelState();
+  Sound.setDuck(1);
+}
+
+function respawnAtStart() {
+  P.hp = P.maxHp;
+  const s = Level.start;
+  playerReset(s.x, s.y, s.z, s.yaw);
+  P.inv = 1.5;
+  camReset();
+  Game.state = 'play';
+  Sound.setDuck(1);
 }
 
 // ---------------- 更新 ----------------
+const seedOv = { eye: [0, 0, 0], target: [0, 0, 0] };
+
 function update(dt) {
   Game.time += dt;
   Game.stT += dt;
   Game.shake = Math.max(0, Game.shake - dt);
-  for (const t of Game.toasts) t.t += dt;
-  Game.toasts = Game.toasts.filter((t) => t.t < t.dur);
+  Game.hurtFlash = Math.max(0, Game.hurtFlash - dt * 1.8);
+  Game.acornPop = Math.max(0, Game.acornPop - dt * 4);
+  Game.heartShake = Math.max(0, Game.heartShake - dt * 2.5);
+  Game.portraitHintT = Math.max(0, Game.portraitHintT - dt);
+  // メッセージ（配列を作り直さずに古いものを消す）
+  const ts = Game.toasts;
+  for (let i = ts.length - 1; i >= 0; i--) { ts[i].t += dt; if (ts[i].t >= ts[i].dur) ts.splice(i, 1); }
+  if (Game.acorns !== Game.shownAcorns) { Game.shownAcorns = Game.acorns; Game.acornPop = 1; }
+  if (P.hp < Game.shownHp) Game.heartShake = 1;
+  Game.shownHp = P.hp;
+
+  // 操作説明を表示中は、閉じる操作だけ受け付ける
+  if (Game.help) {
+    if (Input.okP || Input.backP || Input.tapP || Input.pauseP || Input.jumpP) { Game.help = false; Sound.play('cursor'); }
+    if (Game.state === 'title') { titleCamera(dt); updateLevel(dt); }
+    return;
+  }
 
   if (Game.state === 'title') {
     titleCamera(dt);
     updateLevel(dt);
-    if (Input.anyP && Game.stT > 0.3) { Sound.play('select'); Game.newGame(); }
+    if (Game.stT > 0.3) {
+      const id = menuInput(MENUS.title);
+      if (id === 'start') Game.newGame();
+      else if (id === 'help') Game.help = true;
+    }
     return;
   }
   if (Game.state === 'pause') {
-    if (Input.pauseP || Input.jumpP) { Game.state = 'play'; }
+    if (Input.pauseP || Input.backP) { Game.state = 'play'; Sound.setDuck(1); Sound.play('pause'); return; }
+    const id = menuInput(MENUS.pause);
+    if (id === 'resume') { Game.state = 'play'; Sound.setDuck(1); }
+    else if (id === 'restart') Game.newGame();
+    else if (id === 'sfx') Sound.setSfx(!Sound.sfxOn);
+    else if (id === 'bgm') Sound.setBgm(!Sound.bgmOn);
+    else if (id === 'help') Game.help = true;
+    else if (id === 'title') goTitle();
     return;
   }
-  if (Input.pauseP && Game.state === 'play') { Game.state = 'pause'; return; }
+  if (Input.pauseP && Game.state === 'play') {
+    Game.state = 'pause'; Game.menuSel = 0;
+    Sound.play('pause'); Sound.setDuck(0.35);
+    return;
+  }
 
   if (Game.state === 'play') Game.playTime += dt;
 
@@ -104,35 +217,30 @@ function update(dt) {
     updateCamera(dt);
   } else if (Game.state === 'seed' || Game.state === 'clear') {
     updatePlayer(dt);
-    // 種を取った演出：カメラが正面に回る
-    const a = P.yaw;
-    const d = 5.5;
-    Cam.override = {
-      eye: [P.x + Math.sin(a) * d, P.y + 2.2, P.z + Math.cos(a) * d],
-      target: [P.x, P.y + 1, P.z],
-    };
+    // 種を取った演出：カメラが正面にゆっくり回り込む
+    const a = P.yaw + Math.sin(Game.stT * 0.6) * 0.5;
+    const d = 6.5 - Math.min(1, Game.stT) * 0.8;
+    seedOv.eye[0] = P.x + Math.sin(a) * d; seedOv.eye[1] = P.y + 2.6; seedOv.eye[2] = P.z + Math.cos(a) * d;
+    seedOv.target[0] = P.x; seedOv.target[1] = P.y + 2.1; seedOv.target[2] = P.z;
+    Cam.override = seedOv;
     updateCamera(dt);
-    if (Game.state === 'seed' && Game.stT > 2.6) {
+    if (Game.state === 'seed' && Game.stT > 2.8) {
       Cam.override = null;
       P.state = 'ground';
       Game.state = 'play';
+      Sound.setDuck(1);
       Game.toast(`ひかりの種 ${Game.seeds} / ${Level.seedTotal}`, 2.5);
     }
-    if (Game.state === 'clear' && Game.stT > 3 && Input.anyP) {
-      Cam.override = null;
-      Game.state = 'title'; Game.stT = 0;
+    if (Game.state === 'clear' && Game.stT > 3) {
+      const id = menuInput(MENUS.clear);
+      if (id === 'again') Game.newGame();
+      else if (id === 'title') goTitle();
     }
   }
-  if (Game.state === 'dead' && Game.stT > 2.2) {
-    if (Input.anyP || Game.stT > 6) {
-      // その場の進み具合は残して、スタート地点から再開
-      P.hp = P.maxHp;
-      const s = Level.start;
-      playerReset(s.x, s.y, s.z, s.yaw);
-      P.inv = 1.5;
-      camReset();
-      Game.state = 'play';
-    }
+  if (Game.state === 'dead' && Game.stT > 1.6) {
+    const id = menuInput(MENUS.dead);
+    if (id === 'retry') respawnAtStart(); // その場の進み具合は残して、スタート地点から再開
+    else if (id === 'title') goTitle();
   }
   Fx.update(dt);
 }
@@ -140,16 +248,18 @@ function update(dt) {
 function titleCamera(dt) {
   const a = Game.time * 0.08;
   Cam.override = null;
-  Cam.eye = [Math.sin(a) * 46, 22 + Math.sin(a * 0.7) * 4, Math.cos(a) * 46];
-  Cam.target = [0, 4, -4];
+  Cam.eye[0] = Math.sin(a) * 46; Cam.eye[1] = 22 + Math.sin(a * 0.7) * 4; Cam.eye[2] = Math.cos(a) * 46;
+  Cam.target[0] = 0; Cam.target[1] = 4; Cam.target[2] = -4;
+  void dt;
 }
 
 // ---------------- 描画 ----------------
 function render() {
   if (!R.ok) return;
-  beginFrame(Cam.eye, Cam.target || [0, 0, 0], Cam.fov);
+  beginFrame(Cam.eye, Cam.target, Cam.fov);
   drawLevel();
-  if (Game.state !== 'title') drawPlayer();
+  // カメラが主人公にくっつくほど近いとき（壁ぎわ）は、体の内側が映らないように描かない
+  if (Game.state !== 'title' && (Cam.shown > 0.9 || Cam.override)) drawPlayer();
   drawEntities();
   // 半透明もの（影・粒）
   setBlend(true);
@@ -173,17 +283,52 @@ function resizeHud() {
     layoutTouch(w, h);
   }
 }
+window.addEventListener('orientationchange', () => { hudW = 0; });
 
-function txt(s, x, y, size, color = '#fff', align = 'left', stroke = 'rgba(30,40,70,.85)') {
-  hud.font = `bold ${size}px "Hiragino Maru Gothic ProN","Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif`;
+const FONT_FAMILY = '"Hiragino Maru Gothic ProN","Hiragino Kaku Gothic ProN","BIZ UDPGothic","Noto Sans JP",sans-serif';
+const fontCache = new Map();
+function setFont(size) {
+  const k = Math.round(size * 2);
+  let f = fontCache.get(k);
+  if (!f) { f = 'bold ' + k / 2 + 'px ' + FONT_FAMILY; fontCache.set(k, f); }
+  hud.font = f;
+}
+
+function txt(s, x, y, size, color = '#fff', align = 'left', stroke = 'rgba(40,50,90,.9)') {
+  setFont(size);
   hud.textAlign = align;
   hud.textBaseline = 'middle';
   hud.lineJoin = 'round';
-  hud.lineWidth = Math.max(3, size * 0.2);
-  hud.strokeStyle = stroke;
-  hud.strokeText(s, x, y);
+  if (stroke) {
+    hud.lineWidth = Math.max(3, size * 0.24);
+    hud.strokeStyle = stroke;
+    hud.strokeText(s, x, y);
+  }
   hud.fillStyle = color;
   hud.fillText(s, x, y);
+}
+// 幅に収まるように文字を小さくする
+function txtFit(s, x, y, size, maxW, color, align, stroke) {
+  setFont(size);
+  const w = hud.measureText(s).width;
+  if (w > maxW) size = Math.max(9, size * maxW / w);
+  txt(s, x, y, size, color, align, stroke);
+}
+
+function rrect(x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  hud.beginPath();
+  hud.moveTo(x + r, y);
+  hud.arcTo(x + w, y, x + w, y + h, r);
+  hud.arcTo(x + w, y + h, x, y + h, r);
+  hud.arcTo(x, y + h, x, y, r);
+  hud.arcTo(x, y, x + w, y, r);
+  hud.closePath();
+}
+function panel(x, y, w, h, r, fill = 'rgba(30,50,100,.42)', stroke = 'rgba(255,255,255,.55)') {
+  rrect(x, y, w, h, r);
+  hud.fillStyle = fill; hud.fill();
+  if (stroke) { hud.lineWidth = 2; hud.strokeStyle = stroke; hud.stroke(); }
 }
 
 function drawHeartIcon(x, y, s, full) {
@@ -191,37 +336,112 @@ function drawHeartIcon(x, y, s, full) {
   hud.translate(x, y);
   hud.scale(s / 20, s / 20);
   hud.beginPath();
-  hud.moveTo(0, 6);
-  hud.bezierCurveTo(-10, -2, -10, -12, 0, -6);
-  hud.bezierCurveTo(10, -12, 10, -2, 0, 6);
+  hud.moveTo(0, 7);
+  hud.bezierCurveTo(-11, -1, -10, -12, 0, -5.5);
+  hud.bezierCurveTo(10, -12, 11, -1, 0, 7);
   hud.closePath();
-  hud.fillStyle = full ? '#ff4f6d' : 'rgba(255,255,255,.25)';
-  hud.strokeStyle = 'rgba(30,40,70,.85)';
-  hud.lineWidth = 2.5;
+  hud.fillStyle = full ? '#ff5577' : 'rgba(255,255,255,.28)';
+  hud.strokeStyle = 'rgba(40,50,90,.9)';
+  hud.lineWidth = 2.6;
   hud.stroke();
   hud.fill();
+  if (full) { // つや
+    hud.fillStyle = 'rgba(255,255,255,.7)';
+    hud.beginPath(); hud.ellipse(-4.5, -4.5, 2.4, 1.6, -0.6, 0, TAU); hud.fill();
+  }
   hud.restore();
 }
 
 function drawAcornIcon(x, y, s) {
   hud.save();
   hud.translate(x, y);
-  hud.fillStyle = '#c98a3e'; hud.strokeStyle = 'rgba(30,40,70,.85)'; hud.lineWidth = 2;
+  hud.fillStyle = '#d69548'; hud.strokeStyle = 'rgba(40,50,90,.9)'; hud.lineWidth = 2;
   hud.beginPath(); hud.ellipse(0, s * 0.12, s * 0.32, s * 0.4, 0, 0, TAU); hud.fill(); hud.stroke();
+  hud.fillStyle = 'rgba(255,255,255,.45)';
+  hud.beginPath(); hud.ellipse(-s * 0.12, s * 0.12, s * 0.07, s * 0.14, 0, 0, TAU); hud.fill();
   hud.fillStyle = '#7a5230';
   hud.beginPath(); hud.ellipse(0, -s * 0.18, s * 0.38, s * 0.2, 0, 0, TAU); hud.fill(); hud.stroke();
+  hud.beginPath(); hud.moveTo(0, -s * 0.36); hud.lineTo(s * 0.06, -s * 0.5); hud.stroke();
   hud.restore();
 }
 
-function drawSeedIcon(x, y, s, on) {
+function drawSeedIcon(x, y, s, on, glow) {
   hud.save();
   hud.translate(x, y);
+  if (on && glow) {
+    hud.fillStyle = 'rgba(160,255,240,.35)';
+    hud.beginPath(); hud.arc(0, 0, s * 0.7, 0, TAU); hud.fill();
+  }
   hud.beginPath();
   hud.moveTo(0, -s * 0.5); hud.lineTo(s * 0.32, 0); hud.lineTo(0, s * 0.5); hud.lineTo(-s * 0.32, 0); hud.closePath();
   hud.fillStyle = on ? '#9cfff0' : 'rgba(255,255,255,.22)';
-  hud.strokeStyle = 'rgba(30,40,70,.85)'; hud.lineWidth = 2;
+  hud.strokeStyle = 'rgba(40,50,90,.9)'; hud.lineWidth = 2;
   hud.fill(); hud.stroke();
+  if (on) {
+    hud.fillStyle = 'rgba(255,255,255,.85)';
+    hud.beginPath(); hud.moveTo(0, -s * 0.36); hud.lineTo(s * 0.1, -s * 0.05); hud.lineTo(-s * 0.06, 0); hud.closePath(); hud.fill();
+  }
   hud.restore();
+}
+
+// メニューのボタンを縦に並べて描く
+function drawMenu(items, cx, top, W, H) {
+  const small = Math.min(W, H) < 500;
+  const bw = clamp(W * 0.6, 220, 340);
+  let y = top;
+  for (let i = 0; i < menuRects.length; i++) menuRects[i].on = false;
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const bh = it.big ? (small ? 46 : 54) : (small ? 36 : 42);
+    const sel = i === Game.menuSel;
+    const x = cx - bw / 2;
+    const pop = sel ? 1 + Math.sin(Game.time * 6) * 0.015 : 1;
+    hud.save();
+    hud.translate(cx, y + bh / 2); hud.scale(pop, pop); hud.translate(-cx, -(y + bh / 2));
+    panel(x, y, bw, bh, bh / 2, sel ? 'rgba(255,209,102,.95)' : 'rgba(255,255,255,.88)', sel ? '#fff' : 'rgba(40,50,90,.35)');
+    hud.restore();
+    txtFit(it.label(), cx, y + bh / 2 + 1, it.big ? (small ? 19 : 22) : (small ? 15 : 17), bw - 24, sel ? '#5a3300' : '#2c3e70', 'center', null);
+    if (sel && !Input.touchMode) txt('▶', x - 16, y + bh / 2 + 1, small ? 14 : 17, '#ffd166', 'center');
+    const r = menuRects[i];
+    r.x = x; r.y = y; r.w = bw; r.h = bh; r.on = true;
+    y += bh + (small ? 8 : 10);
+  }
+  return y;
+}
+
+// 操作説明
+function drawHelp(W, H) {
+  hud.fillStyle = 'rgba(20,30,60,.6)';
+  hud.fillRect(0, 0, W, H);
+  const S = Input.safe;
+  const pw = Math.min(W - S.l - S.r - 20, 620), ph = Math.min(H - S.t - S.b - 16, 520);
+  const px = (W - pw) / 2, py = (H - ph) / 2;
+  panel(px, py, pw, ph, 18, 'rgba(255,252,240,.97)', '#ffd166');
+  const touch = Input.touchMode || (Input.hasTouch && !Input.padOn && !Input.keys.size);
+  const ctl = touch
+    ? [['いどう', '画面の左をなぞる'], ['カメラ', '画面の右をなぞる（2回タップで後ろへ）'], ['ジャンプ／パンチ／しゃがむ', '右下のボタン'], ['しゃがむ＋ジャンプ', 'しゃがむを押したまま ジャンプへ指をすべらせる']]
+    : [['いどう', 'WASD / 矢印キー（パッド：左スティック）'], ['ジャンプ／パンチ', 'スペース ／ J（パッド：A ／ B・X）'], ['しゃがむ', 'Shift（パッド：L・ZL・ZR）'], ['カメラ', 'ドラッグ・Q/E・右スティック（F：後ろへ　R：遠近）']];
+  const moves = [
+    ['3段ジャンプ', '走って、着地のたびにジャンプ（3回目はくるっと高く）'],
+    ['幅とび', '走りながら しゃがむ＋ジャンプ'],
+    ['バク宙', '止まって しゃがむ＋ジャンプ'],
+    ['くるりんジャンプ', '走っていて逆を入れ、ブレーキ中にジャンプ'],
+    ['壁キック', '壁にぶつかった瞬間にジャンプ'],
+    ['ヒップドロップ', '空中で しゃがむ（着地してすぐジャンプで大ジャンプ）'],
+    ['パンチ3れんぞく／ダイブ', 'パンチを続けて押す／走りジャンプ中にパンチ'],
+    ['坂すべり', '坂で しゃがむ'],
+  ];
+  const lines = ctl.length + moves.length + 2;
+  const lh = clamp((ph - 70) / lines, 15, 28);
+  const fs = clamp(lh * 0.62, 10, 16);
+  txt('あそびかた', W / 2, py + 26, clamp(lh, 18, 24), '#ff9f1c', 'center', '#fff');
+  let y = py + 54;
+  const colA = px + 16, colB = px + Math.min(pw * 0.38, 210);
+  txt('そうさ', colA, y, fs, '#2c7be5', 'left', null); y += lh;
+  for (const [a, b] of ctl) { txtFit(a, colA, y, fs, colB - colA - 8, '#2c3e70', 'left', null); txtFit(b, colB, y, fs, px + pw - colB - 12, '#444', 'left', null); y += lh; }
+  txt('わざ', colA, y, fs, '#2c7be5', 'left', null); y += lh;
+  for (const [a, b] of moves) { txtFit(a, colA, y, fs, colB - colA - 8, '#2c3e70', 'left', null); txtFit(b, colB, y, fs, px + pw - colB - 12, '#444', 'left', null); y += lh; }
+  if (Math.floor(Game.time * 2) % 2 === 0) txt(touch ? 'タップでとじる' : 'Enter / Esc でとじる', W / 2, py + ph - 14, fs, '#999', 'center', null);
 }
 
 function drawHud() {
@@ -229,6 +449,7 @@ function drawHud() {
   hud.setTransform(hudDpr, 0, 0, hudDpr, 0, 0);
   hud.clearRect(0, 0, hudW, hudH);
   const W = hudW, H = hudH;
+  const S = Input.safe;
   const small = Math.min(W, H) < 500;
   const fs = small ? 16 : 20;
 
@@ -237,109 +458,234 @@ function drawHud() {
     return;
   }
 
-  if (Game.state === 'title') {
-    hud.fillStyle = 'rgba(20,40,80,.18)';
-    hud.fillRect(0, 0, W, H);
-    const ts = clamp(W / 14, 26, 64);
-    const bob = Math.sin(Game.time * 2) * 4;
-    txt('ころんの', W / 2, H * 0.26 + bob, ts * 0.6, '#fff6d8', 'center');
-    txt('空島アドベンチャー', W / 2, H * 0.26 + ts * 0.85 + bob, ts, '#ffd166', 'center');
-    if (Math.floor(Game.time * 2) % 2 === 0) txt(Input.touchMode || 'ontouchstart' in window ? 'タップでスタート' : 'Enter / スペースでスタート', W / 2, H * 0.62, fs + 2, '#fff', 'center');
-    const lines = 'ontouchstart' in window && Input.touchMode !== false
-      ? ['左側をなぞって移動 ／ 右側をドラッグでカメラ', 'ジャンプ・パンチ・しゃがむ はボタンで']
-      : ['移動：WASD / 矢印　ジャンプ：スペース　パンチ：J　しゃがむ：Shift', 'カメラ：Q・E またはマウスでドラッグ　遠近：R　ポーズ：Esc'];
-    lines.forEach((l, i) => txt(l, W / 2, H * 0.74 + i * (fs + 8), fs * 0.75, '#e8f4ff', 'center'));
-    if (Game.best) txt('ベストクリア ' + fmtTime(Game.best), W / 2, H * 0.9, fs * 0.8, '#ffe9a8', 'center');
-    return;
+  if (Game.state === 'title') { drawTitle(W, H, fs, small); if (Game.help) drawHelp(W, H); return; }
+
+  // ---- 体力 ----
+  const L = S.l + 12, T0 = S.t + 10;
+  const hs = small ? 26 : 30;
+  const hx = Math.sin(Game.time * 60) * Game.heartShake * 4;
+  panel(L, T0, P.maxHp * (hs + 6) + 14, hs + 14, (hs + 14) / 2);
+  for (let i = 0; i < P.maxHp; i++) {
+    const danger = P.hp === 1 && i === 0 ? 1 + Math.sin(Game.time * 9) * 0.12 : 1;
+    drawHeartIcon(L + 7 + hs / 2 + 3 + i * (hs + 6) + hx, T0 + (hs + 14) / 2 + 1, hs * danger, i < P.hp);
   }
+  // ---- どんぐり ----
+  const ay = T0 + hs + 22;
+  const pop = 1 + Game.acornPop * 0.35;
+  setFont(fs + 2);
+  const aw = hud.measureText('× ' + Game.acorns).width;
+  panel(L, ay, aw + 50, hs + 8, (hs + 8) / 2);
+  drawAcornIcon(L + 20, ay + (hs + 8) / 2, 24 * pop);
+  txt('× ' + Game.acorns, L + 38, ay + (hs + 8) / 2 + 1, (fs + 2) * pop, Game.acornPop > 0 ? '#ffe08a' : '#fff');
+  // ---- 種 ----
+  const n = Level.seedTotal;
+  const sw = n * 26 + 18;
+  const portrait = H > W;
+  const seedY = portrait ? T0 + hs + 22 + hs + 22 : T0;
+  const seedX = portrait ? L : W / 2 - sw / 2;
+  panel(seedX, seedY, sw, hs + 14, (hs + 14) / 2);
+  for (let i = 0; i < n; i++) drawSeedIcon(seedX + 22 + i * 26, seedY + (hs + 14) / 2, 22, i < Game.seeds, true);
+  // ---- タイム ----
+  const touchUI = Input.touchMode && (Game.state === 'play' || Game.state === 'pause');
+  const tx = touchUI ? (Input.btns.camera ? Input.btns.camera.x - 32 : W - 130) : W - S.r - 14;
+  txt(fmtTime(Game.playTime), tx, T0 + (hs + 14) / 2, fs, '#fff', 'right');
 
-  // 体力
-  for (let i = 0; i < P.maxHp; i++) drawHeartIcon(26 + i * 34, 30, small ? 28 : 32, i < P.hp);
-  // どんぐり
-  drawAcornIcon(26, 70, 26);
-  txt('× ' + Game.acorns, 44, 71, fs + 2);
-  // 種
-  for (let i = 0; i < Level.seedTotal; i++) drawSeedIcon(W / 2 - (Level.seedTotal - 1) * 14 + i * 28, 28, 26, i < Game.seeds);
-  // 時間
-  txt(fmtTime(Game.playTime), W - (Input.touchMode ? 70 : 20), 30, fs, '#fff', 'right');
-
-  // メッセージ
-  Game.toasts.forEach((t, i) => {
-    const a = Math.min(1, t.t * 4, (t.dur - t.t) * 2);
+  // ---- メッセージ ----
+  const showToast = Game.state === 'play' || Game.state === 'seed';
+  for (let i = 0; showToast && i < Game.toasts.length; i++) {
+    const t = Game.toasts[i];
+    const a = Math.min(1, t.t * 5, (t.dur - t.t) * 2);
+    const yy = (portrait ? H * 0.3 : H * 0.22) + i * (fs + 20) - (1 - Math.min(1, t.t * 5)) * 10;
     hud.globalAlpha = a;
-    txt(t.msg, W / 2, H * 0.2 + i * (fs + 14), fs + 2, '#fff', 'center');
+    setFont(fs + 1);
+    const tw = Math.min(hud.measureText(t.msg).width, W - 40);
+    panel(W / 2 - tw / 2 - 16, yy - (fs + 12) / 2, tw + 32, fs + 12, (fs + 12) / 2, 'rgba(255,255,255,.88)', null);
+    txtFit(t.msg, W / 2, yy + 1, fs + 1, W - 40, '#2c3e70', 'center', null);
     hud.globalAlpha = 1;
-  });
+  }
 
-  if (Game.state === 'seed' && Game.lastSeed) {
-    const k = Math.min(1, Game.stT * 3);
-    txt('ひかりの種 ゲット！', W / 2, H * 0.32 - (1 - k) * 30, clamp(W / 16, 26, 52) * k, '#9cfff0', 'center');
-    txt(Game.lastSeed.name, W / 2, H * 0.32 + 48, fs, '#fff', 'center');
+  // ---- ダメージの赤いふち ----
+  if (Game.hurtFlash > 0) {
+    const g = hud.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.75);
+    g.addColorStop(0, 'rgba(255,40,60,0)');
+    g.addColorStop(1, `rgba(255,40,60,${Game.hurtFlash * 0.45})`);
+    hud.fillStyle = g; hud.fillRect(0, 0, W, H);
   }
-  if (Game.state === 'clear') {
-    hud.fillStyle = `rgba(255,250,220,${Math.min(0.35, Game.stT * 0.2)})`;
-    hud.fillRect(0, 0, W, H);
-    txt('ぜんぶ 集めた！ クリア！', W / 2, H * 0.3, clamp(W / 16, 26, 54), '#ffd166', 'center');
-    txt('タイム ' + fmtTime(Game.playTime) + (Game.newRecord ? '  ベスト更新！' : ''), W / 2, H * 0.3 + 56, fs + 4, '#fff', 'center');
-    txt('どんぐり ' + Game.acorns + ' こ', W / 2, H * 0.3 + 92, fs, '#fff', 'center');
-    if (Game.stT > 3) txt('タップ / Enter でタイトルへ', W / 2, H * 0.75, fs, '#fff', 'center');
-  }
+
+  if (Game.state === 'seed' && Game.lastSeed) drawSeedGet(W, H, fs);
+  if (Game.state === 'clear') drawClear(W, H, fs, small);
   if (Game.state === 'dead') {
-    hud.fillStyle = `rgba(30,10,30,${Math.min(0.45, Game.stT * 0.3)})`;
+    hud.fillStyle = `rgba(30,10,40,${Math.min(0.5, Game.stT * 0.35)})`;
     hud.fillRect(0, 0, W, H);
-    txt('ころんは たおれてしまった…', W / 2, H * 0.38, clamp(W / 20, 22, 40), '#fff', 'center');
-    if (Game.stT > 2.2) txt('タップ / Enter で スタート地点から再開', W / 2, H * 0.5, fs, '#ffe9a8', 'center');
+    const k = Math.min(1, Game.stT * 2);
+    txt('ころんは たおれてしまった…', W / 2, H * 0.3 - (1 - k) * 20, clamp(W / 20, 22, 40), '#fff', 'center');
+    if (Game.stT > 1.6) drawMenu(MENUS.dead, W / 2, H * 0.45, W, H);
   }
   if (Game.state === 'pause') {
-    hud.fillStyle = 'rgba(20,30,60,.5)';
+    hud.fillStyle = 'rgba(20,30,60,.55)';
     hud.fillRect(0, 0, W, H);
-    txt('ポーズ', W / 2, H * 0.3, 44, '#fff', 'center');
-    const got = Level.seeds.filter((s) => s.got).map((s) => '◆ ' + s.name);
-    const left = Level.seeds.filter((s) => !s.got).length;
-    got.forEach((g, i) => txt(g, W / 2, H * 0.42 + i * (fs + 6), fs * 0.85, '#9cfff0', 'center'));
-    txt('のこり ' + left + ' こ', W / 2, H * 0.42 + got.length * (fs + 6) + 10, fs * 0.85, '#fff', 'center');
-    txt('ジャンプ / Esc で つづける', W / 2, H * 0.85, fs, '#ffe9a8', 'center');
+    const land = W > H;
+    const items = MENUS.pause;
+    const menuH = items.length * (small ? 44 : 52) + 10;
+    if (land && W > 640) {
+      // 横長：左に進み具合、右にメニュー
+      txt('ポーズ', W * 0.3, H * 0.2, small ? 30 : 40, '#fff', 'center');
+      drawProgress(W * 0.3, H * 0.2 + 44, fs);
+      drawMenu(items, W * 0.68, Math.max(S.t + 16, (H - menuH) / 2), W * 0.6, H);
+    } else {
+      txt('ポーズ', W / 2, S.t + 40, small ? 28 : 40, '#fff', 'center');
+      const y = drawProgress(W / 2, S.t + 76, fs * 0.85, true);
+      drawMenu(items, W / 2, Math.max(y + 10, H - S.b - menuH - 10), W, H);
+    }
   }
+  if (Game.help) drawHelp(W, H);
 
-  // タッチ操作ボタン
-  if (Input.touchMode && (Game.state === 'play' || Game.state === 'pause')) drawTouchUI();
+  // ---- タッチ操作ボタン ----
+  if (Input.touchMode && Game.state === 'play') drawTouchUI();
+  // ---- 縦向きの案内 ----
+  if (Input.touchMode && portrait && Game.state === 'play' && Game.portraitHintT > 0) {
+    hud.globalAlpha = Math.min(1, Game.portraitHintT);
+    panel(W / 2 - 130, H * 0.55, 260, 34, 17, 'rgba(255,255,255,.85)', null);
+    txt('よこむきにすると 遊びやすいよ', W / 2, H * 0.55 + 18, 14, '#2c3e70', 'center', null);
+    hud.globalAlpha = 1;
+  }
+}
+
+// 集めた種の一覧。compact なら 1 行にまとめる
+function drawProgress(cx, y, fs, compact) {
+  const left = Level.seeds.filter((s) => !s.got).length;
+  if (compact) {
+    txt(`ひかりの種 ${Game.seeds} / ${Level.seedTotal}　どんぐり ${Game.acorns}`, cx, y, fs, '#9cfff0', 'center');
+    return y + fs + 8;
+  }
+  let yy = y;
+  for (const s of Level.seeds) {
+    if (!s.got) continue;
+    txt('◆ ' + s.name, cx, yy, fs * 0.85, '#9cfff0', 'center'); yy += fs + 6;
+  }
+  txt('のこり ' + left + ' こ　どんぐり ' + Game.acorns + ' こ', cx, yy + 6, fs * 0.85, '#fff', 'center');
+  txt('タイム ' + fmtTime(Game.playTime), cx, yy + fs + 16, fs * 0.85, '#fff', 'center');
+  return yy + fs * 2 + 20;
+}
+
+function drawTitle(W, H, fs, small) {
+  const g = hud.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, 'rgba(255,255,255,0)');
+  g.addColorStop(1, 'rgba(30,60,120,.35)');
+  hud.fillStyle = g; hud.fillRect(0, 0, W, H);
+  const portrait = H > W;
+  const ts = clamp(Math.min(W / 11, H / 6), 26, 70);
+  const bob = Math.sin(Game.time * 2) * 4;
+  const ty = portrait ? H * 0.2 : H * 0.2;
+  // ロゴ：1文字ずつ少しずつ揺らす
+  txt('ころんの', W / 2, ty - ts * 0.2 + bob, ts * 0.55, '#fff6d8', 'center');
+  const title = '空島アドベンチャー';
+  setFont(ts);
+  const tw = Math.min(hud.measureText(title).width, W - 30);
+  const k = tw / hud.measureText(title).width;
+  let x = W / 2 - tw / 2;
+  for (let i = 0; i < title.length; i++) {
+    const ch = title[i];
+    setFont(ts * k);
+    const cw = hud.measureText(ch).width;
+    const yy = ty + ts * 0.85 + Math.sin(Game.time * 3 + i * 0.6) * 4;
+    txt(ch, x + cw / 2, yy, ts * k, i < 2 ? '#8ee0ff' : '#ffd166', 'center', 'rgba(40,50,90,.95)');
+    x += cw;
+  }
+  const menuTop = portrait ? H * 0.46 : ty + ts * 1.8;
+  const y = drawMenu(MENUS.title, W / 2, menuTop, W, H);
+  const touch = Input.touchMode || Input.hasTouch;
+  const hint = touch ? 'ボタンをタップしてね' : 'Enter / スペースで決定　↑↓で えらぶ';
+  if (Math.floor(Game.time * 1.5) % 2 === 0) txt(hint, W / 2, y + 12, fs * 0.8, '#fff', 'center');
+  let by = H - Input.safe.b - 20;
+  if (Game.best) { txt('ベストクリア ' + fmtTime(Game.best), W / 2, by, fs * 0.8, '#ffe9a8', 'center'); by -= fs + 6; }
+  if (touch && portrait) txt('スマホは よこむきが おすすめ', W / 2, by, fs * 0.75, '#fff', 'center');
+  void small;
+}
+
+function drawSeedGet(W, H, fs) {
+  const t = Game.stT;
+  const k = Math.min(1, t * 3);
+  const bounce = 1 + Math.sin(Math.min(1, t * 2.5) * Math.PI) * 0.25;
+  const cy = H * 0.22;
+  // 光の筋
+  hud.save();
+  hud.translate(W / 2, cy);
+  hud.rotate(t * 0.6);
+  hud.globalAlpha = Math.min(0.3, t) * (t > 2.3 ? Math.max(0, (2.8 - t) * 2) : 1);
+  hud.fillStyle = '#fff6b0';
+  const rl = Math.max(W, H) * 0.6;
+  for (let i = 0; i < 12; i++) {
+    hud.rotate(TAU / 12);
+    hud.beginPath(); hud.moveTo(0, 0); hud.lineTo(rl, -rl * 0.08); hud.lineTo(rl, rl * 0.08); hud.closePath(); hud.fill();
+  }
+  hud.restore();
+  hud.globalAlpha = 1;
+  drawSeedIcon(W / 2, cy - 30, 54 * bounce * k, true, true);
+  txt('ひかりの種 ゲット！', W / 2, cy + 40 - (1 - k) * 30, clamp(W / 16, 26, 52) * k * (t < 0.4 ? bounce : 1), '#9cfff0', 'center');
+  if (t > 0.4) txt(Game.lastSeed.name, W / 2, cy + 40 + clamp(W / 16, 26, 52) * 0.75 + 6, fs, '#fff', 'center');
+  if (t > 0.6) txt(Game.seeds + ' / ' + Level.seedTotal, W / 2, cy + 40 + clamp(W / 16, 26, 52) * 0.75 + fs + 16, fs + 4, '#ffe08a', 'center');
+}
+
+function drawClear(W, H, fs, small) {
+  hud.fillStyle = `rgba(255,250,220,${Math.min(0.4, Game.stT * 0.2)})`;
+  hud.fillRect(0, 0, W, H);
+  const k = Math.min(1, Game.stT * 1.5);
+  const cy = H * 0.24;
+  txt('ぜんぶ 集めた！ クリア！', W / 2, cy - (1 - k) * 30, clamp(W / 16, 24, 54) * (0.6 + 0.4 * k), '#ffd166', 'center');
+  if (Game.stT > 0.8) {
+    const pw = Math.min(W - 40, 360), ph = small ? 96 : 120;
+    panel(W / 2 - pw / 2, cy + 36, pw, ph, 16, 'rgba(255,255,255,.9)', '#ffd166');
+    txt('タイム ' + fmtTime(Game.playTime), W / 2, cy + 36 + ph * 0.28, fs + 4, '#2c3e70', 'center', null);
+    if (Game.newRecord) txt('ベスト更新！', W / 2, cy + 36 + ph * 0.52, fs, '#ff5577', 'center', null);
+    txt('どんぐり ' + Game.acorns + ' / ' + Level.acornTotal, W / 2, cy + 36 + ph * 0.78, fs, '#7a5230', 'center', null);
+    if (Game.stT > 3) drawMenu(MENUS.clear, W / 2, cy + 36 + ph + 16, W, H);
+  }
 }
 
 function drawTouchUI() {
   hud.save();
   for (const k in Input.btns) {
     const b = Input.btns[k];
+    const r = b.r * (b.down ? 0.92 : 1);
     hud.beginPath();
-    hud.arc(b.x, b.y, b.r, 0, TAU);
-    hud.fillStyle = b.down ? 'rgba(255,255,255,.55)' : 'rgba(255,255,255,.22)';
+    hud.arc(b.x, b.y, r, 0, TAU);
+    if (b.small) hud.fillStyle = b.down ? 'rgba(255,255,255,.6)' : 'rgba(30,50,100,.35)';
+    else hud.fillStyle = b.down ? 'rgba(255,255,255,.65)' : 'rgba(255,255,255,.2)';
     hud.fill();
-    hud.lineWidth = 2.5;
-    hud.strokeStyle = 'rgba(255,255,255,.7)';
+    hud.lineWidth = b.small ? 2 : 3;
+    hud.strokeStyle = b.col || 'rgba(255,255,255,.8)';
     hud.stroke();
-    txt(b.label, b.x, b.y, k === 'pause' || k === 'camera' ? 16 : Math.max(11, b.r * 0.34), '#fff', 'center');
+    if (b.small) txt(b.label, b.x, b.y + 1, k === 'pause' ? 16 : 10, '#fff', 'center');
+    else txtFit(b.label, b.x, b.y + 1, Math.max(12, b.r * 0.34), b.r * 1.8, '#fff', 'center');
   }
+  const R0 = Input.stickR;
   if (Input.stick) {
     const s = Input.stick;
-    hud.beginPath(); hud.arc(s.ox, s.oy, 60, 0, TAU);
+    hud.beginPath(); hud.arc(s.ox, s.oy, R0, 0, TAU);
     hud.fillStyle = 'rgba(255,255,255,.15)'; hud.fill();
-    hud.strokeStyle = 'rgba(255,255,255,.5)'; hud.lineWidth = 2; hud.stroke();
+    hud.strokeStyle = 'rgba(255,255,255,.55)'; hud.lineWidth = 2.5; hud.stroke();
     let dx = s.x - s.ox, dy = s.y - s.oy; const d = Math.hypot(dx, dy);
-    if (d > 60) { dx *= 60 / d; dy *= 60 / d; }
-    hud.beginPath(); hud.arc(s.ox + dx, s.oy + dy, 26, 0, TAU);
-    hud.fillStyle = 'rgba(255,255,255,.6)'; hud.fill();
+    if (d > R0) { dx *= R0 / d; dy *= R0 / d; }
+    hud.beginPath(); hud.arc(s.ox + dx, s.oy + dy, R0 * 0.45, 0, TAU);
+    hud.fillStyle = 'rgba(255,255,255,.7)'; hud.fill();
   } else {
-    txt('ここをなぞって移動', 90, hudH - 40, 13, 'rgba(255,255,255,.75)', 'center');
+    // さわっていないときは、いつもの場所にうっすら表示
+    const hx = Input.stickHome.x, hy = Input.stickHome.y;
+    hud.beginPath(); hud.arc(hx, hy, R0, 0, TAU);
+    hud.fillStyle = 'rgba(255,255,255,.08)'; hud.fill();
+    hud.strokeStyle = 'rgba(255,255,255,.35)'; hud.lineWidth = 2; hud.stroke();
+    hud.beginPath(); hud.arc(hx, hy, R0 * 0.45, 0, TAU);
+    hud.fillStyle = 'rgba(255,255,255,.25)'; hud.fill();
+    if (Game.playTime < 20) txt('いどう', hx, hy, 13, 'rgba(255,255,255,.9)', 'center');
   }
   hud.restore();
 }
 
 // ---------------- メインループ ----------------
 let lastT = performance.now();
-function frame(now) {
-  let dt = (now - lastT) / 1000;
-  lastT = now;
-  if (dt > 0.1) dt = 0.1;
-  Game.fps = lerp(Game.fps, 1 / Math.max(dt, 1e-3), 0.05);
+const debug = { manual: false };
+function stepGame(dt) {
   pollInput();
   // 物理は細かく刻む（1/120 秒ずつ）
   const step = 1 / 120;
@@ -350,8 +696,20 @@ function frame(now) {
     if (first) { clearPressed(); first = false; }
     acc -= h;
   }
+}
+function frame(now) {
+  let dt = (now - lastT) / 1000;
+  lastT = now;
+  if (dt > 0.1) dt = 0.1;
+  Game.fps = lerp(Game.fps, 1 / Math.max(dt, 1e-3), 0.05);
+  const t0 = performance.now();
+  if (!debug.manual) stepGame(dt);
+  Music.update();
+  const t1 = performance.now();
   render();
+  const t2 = performance.now();
   drawHud();
+  Game.cpuMs = lerp(Game.cpuMs, (t1 - t0) + (performance.now() - t2), 0.05);
   requestAnimationFrame(frame);
 }
 
@@ -363,8 +721,10 @@ function boot() {
     R.ok = false;
     console.error(e);
   }
-  Cam.eye = [40, 20, 40]; Cam.target = [0, 0, 0];
-  window.KORON = { Game, P, Cam, Level, World, Input, R };
+  Cam.eye[0] = 40; Cam.eye[1] = 20; Cam.eye[2] = 40;
+  readSafeArea();
+  // デバッグ用：KORON.step(秒) で入力を入れたまま時間を進められる（debug.manual=true のとき）
+  window.KORON = { Game, P, PL, Cam, Level, World, Input, R, Sound, Music, debug, step: stepGame, camReset, menuRects };
   requestAnimationFrame(frame);
 }
 boot();
