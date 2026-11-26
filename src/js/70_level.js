@@ -30,7 +30,8 @@ const NOGEO = { box() { return this; }, cyl() { return this; }, sphere() { retur
 // ステージの一覧（id の順）。各ステージは defineStage で登録する
 //   id, name, killY（落下とみなす高さ）, start（スタート位置）, env（空・霧・光）, music（BGM の調とテンポ）,
 //   tint（地形・敵にかける色）, titleCam（タイトル・ステージ選びの背景のカメラ）, unlock（開く条件）, build(K)
-//   ending: {seed}（この種を取るとエンディング。74_boss.js）。build の中で Level.hud = 関数(W,H,fs,small) を入れると、遊んでいる間の画面に描ける
+//   ending: {seed}（この種を取るとエンディング。74_boss.js）。build の中で Level.hud = 関数(W,H,fs,small) を入れると、遊んでいる間の画面に描ける。
+//   Level.hudActive = 関数() が true の間は、HUD を毎フレーム全体で描き直す（ない場合は hud があればいつも）
 const STAGES = [];
 function defineStage(def) { STAGES[def.id] = def; return def; }
 
@@ -57,7 +58,7 @@ function buildLevel(id) {
     acorns: [], seeds: [], hearts: [], enemies: [], movers: [], springs: [], signs: [], clouds: [],
     spinners: [], fallers: [], stakes: [], risers: [], launchers: [], mills: [], flags: [],
     stakeDone: false, arenaDone: false,
-    updaters: [], drawers: [], poundHooks: [], acornSeed: null, arenaSeed: null, hud: null,
+    updaters: [], drawers: [], poundHooks: [], acornSeed: null, arenaSeed: null, hud: null, hudActive: null,
     tint: st.tint || WHITE,
     start: Object.assign({}, st.start),
   });

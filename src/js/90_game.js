@@ -876,6 +876,8 @@ function drawHud() {
         hudOtherAdd(W / 2 - 132, H * 0.55 - 2, 264, 38);
         rest += '|h' + Math.min(1, Game.portraitHintT);
       }
+      // ステージ専用の表示（ボスの体力ゲージなど）は区画にしていないので、出ている間は全体を描き直す
+      if (Level.hud && (!Level.hudActive || Level.hudActive())) rest += '|L' + HudStat.frames;
       const can = !resized && hudValid && !HudStat.forceFull;
       if (can && rest !== hudRest) HudStat.why.rest++;
       else if (can && !hudPartial()) HudStat.why.overlap++;

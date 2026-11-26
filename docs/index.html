@@ -4020,7 +4020,8 @@ const NOGEO = { box() { return this; }, cyl() { return this; }, sphere() { retur
 // ステージの一覧（id の順）。各ステージは defineStage で登録する
 //   id, name, killY（落下とみなす高さ）, start（スタート位置）, env（空・霧・光）, music（BGM の調とテンポ）,
 //   tint（地形・敵にかける色）, titleCam（タイトル・ステージ選びの背景のカメラ）, unlock（開く条件）, build(K)
-//   ending: {seed}（この種を取るとエンディング。74_boss.js）。build の中で Level.hud = 関数(W,H,fs,small) を入れると、遊んでいる間の画面に描ける
+//   ending: {seed}（この種を取るとエンディング。74_boss.js）。build の中で Level.hud = 関数(W,H,fs,small) を入れると、遊んでいる間の画面に描ける。
+//   Level.hudActive = 関数() が true の間は、HUD を毎フレーム全体で描き直す（ない場合は hud があればいつも）
 const STAGES = [];
 function defineStage(def) { STAGES[def.id] = def; return def; }
 
@@ -4047,7 +4048,7 @@ function buildLevel(id) {
     acorns: [], seeds: [], hearts: [], enemies: [], movers: [], springs: [], signs: [], clouds: [],
     spinners: [], fallers: [], stakes: [], risers: [], launchers: [], mills: [], flags: [],
     stakeDone: false, arenaDone: false,
-    updaters: [], drawers: [], poundHooks: [], acornSeed: null, arenaSeed: null, hud: null,
+    updaters: [], drawers: [], poundHooks: [], acornSeed: null, arenaSeed: null, hud: null, hudActive: null,
     tint: st.tint || WHITE,
     start: Object.assign({}, st.start),
   });
@@ -5482,6 +5483,13 @@ function buildStage3(K) {
     boss: null, inZone: false, floats: [],
   };
   Level.hud = drawStage3Hud;
+  // 星くずの残り時間かボスの体力ゲージが出ている間だけ、HUD を毎フレーム描き直す
+  Level.hudActive = () => {
+    const S3 = Level.s3;
+    if (!S3) return false;
+    const B = S3.boss;
+    return !!(S3.shardOn || (B && (B.active || (B.state === 'defeat' && !B.done))));
+  };
 
   // ---------- 色 ----------
   const NG1 = hex(0x4a5aa6), NG2 = hex(0x6476c4), NSOIL = hex(0x3c356a), NSOIL2 = hex(0x272250);
@@ -8003,6 +8011,8 @@ function drawHud() {
         hudOtherAdd(W / 2 - 132, H * 0.55 - 2, 264, 38);
         rest += '|h' + Math.min(1, Game.portraitHintT);
       }
+      // ステージ専用の表示（ボスの体力ゲージなど）は区画にしていないので、出ている間は全体を描き直す
+      if (Level.hud && (!Level.hudActive || Level.hudActive())) rest += '|L' + HudStat.frames;
       const can = !resized && hudValid && !HudStat.forceFull;
       if (can && rest !== hudRest) HudStat.why.rest++;
       else if (can && !hudPartial()) HudStat.why.overlap++;

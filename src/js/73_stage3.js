@@ -53,6 +53,13 @@ function buildStage3(K) {
     boss: null, inZone: false, floats: [],
   };
   Level.hud = drawStage3Hud;
+  // 星くずの残り時間かボスの体力ゲージが出ている間だけ、HUD を毎フレーム描き直す
+  Level.hudActive = () => {
+    const S3 = Level.s3;
+    if (!S3) return false;
+    const B = S3.boss;
+    return !!(S3.shardOn || (B && (B.active || (B.state === 'defeat' && !B.done))));
+  };
 
   // ---------- 色 ----------
   const NG1 = hex(0x4a5aa6), NG2 = hex(0x6476c4), NSOIL = hex(0x3c356a), NSOIL2 = hex(0x272250);
