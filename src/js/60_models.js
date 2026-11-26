@@ -780,12 +780,13 @@ const Fx = {
       if (s.got || s.hidden) continue;
       const y = s.y + Math.sin(s.t * 2) * 0.2;
       const pulse = 0.85 + Math.sin(s.t * 4) * 0.15;
-      Sprites.add(s.x, y + 0.75, s.z, 2.2 * pulse, 1, 0.4, 1, 0.85, 0.32);
-      Sprites.add(s.x, y + 0.8, s.z, 2.0, 2, 0.8, 1, 0.95, 0.3, t * 0.6);
-      Sprites.add(s.x, y + 0.8, s.z, 1.5, 2, 0.8, 1, 0.95, 0.2, -t * 0.9 + 0.7);
+      const k = s.old ? 0.35 : 1; // 取ったことがある種は光をひかえめに
+      Sprites.add(s.x, y + 0.75, s.z, 2.2 * pulse, 1, 0.4, 1, 0.85, 0.32 * k);
+      Sprites.add(s.x, y + 0.8, s.z, 2.0, 2, 0.8, 1, 0.95, 0.3 * k, t * 0.6);
+      Sprites.add(s.x, y + 0.8, s.z, 1.5, 2, 0.8, 1, 0.95, 0.2 * k, -t * 0.9 + 0.7);
       const g = groundBelow(s.x, s.z, s.y + 0.5, 0);
       if (g) {
-        Sprites.add(s.x, g.y + 0.05, s.z, 1.4 * pulse, 5, 0.4, 1, 0.85, 0.4);
+        Sprites.add(s.x, g.y + 0.05, s.z, 1.4 * pulse, 5, 0.4, 1, 0.85, 0.4 * k);
         const rk = (t * 0.7 + s.id * 0.3) % 1;
         Sprites.add(s.x, g.y + 0.06, s.z, 0.4 + rk * 1.0, 4, 0.6, 1, 0.9, (1 - rk) * 0.6);
       }

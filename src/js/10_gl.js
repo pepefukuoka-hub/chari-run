@@ -29,6 +29,9 @@ const R = {
   cam: [0, 0, 0],
   // 太陽の向き（光がやってくる方向）。少し低めにして影を長めに
   light: v3.norm([0.42, 0.72, 0.55]),
+  lightCol: [1.0, 0.93, 0.82],   // 陽ざしの色
+  ambLo: [0.46, 0.38, 0.3],      // 環境光（下）
+  ambHi: [0.58, 0.72, 1.0],      // 環境光（上）
   fogCol: [0.78, 0.88, 0.97],   // 地平線の色（フォグの色にもなる）
   fog: [45, 150],
   sky: {
@@ -122,6 +125,9 @@ uniform float uAlpha;
 uniform float uTime;
 uniform sampler2DShadow uShadow;
 uniform vec3 uShInfo; // x: 1テクセル, y: 影の濃さ, z: 有効なら1
+uniform vec3 uSunLight; // 陽ざしの色（ステージごと）
+uniform vec3 uAmbLo;    // 環境光：下（地面の照り返し）
+uniform vec3 uAmbHi;    // 環境光：上（空）
 out vec4 o;
 ${SKY_GLSL}
 float shadowAt(){
@@ -178,8 +184,8 @@ void main(){
   diff *= min(sh, smoothstep(-0.1, 0.12, d) * 0.5 + 0.5);
   // 環境光：上は空の青、下は地面の照り返し
   float hemi = n.y * 0.5 + 0.5;
-  vec3 amb = mix(vec3(0.46, 0.38, 0.3), vec3(0.58, 0.72, 1.0), hemi) * 0.42;
-  vec3 sun = vec3(1.0, 0.93, 0.82) * 0.92;
+  vec3 amb = mix(uAmbLo, uAmbHi, hemi) * 0.42;
+  vec3 sun = uSunLight * 0.92;
   // 正面からのやわらかい補助光（逆光でもキャラが暗くなりすぎない）
   vec3 fill = vec3(0.55, 0.6, 0.7) * max(dot(n, v), 0.0) * 0.16;
   vec3 lit = col * (amb + fill + sun * diff);
@@ -289,7 +295,7 @@ function linkProg(vs, fs, names, defs) {
 
 // ---------- シェーダーの種類（画質ごとに必要になったら作る） ----------
 const MAIN_UNIFORMS = ['uVP', 'uM', 'uN', 'uLVP', 'uShOff', 'uTint', 'uLight', 'uCam', 'uFogCol', 'uFog', 'uEmit', 'uAlpha',
-  'uTime', 'uShadow', 'uShInfo', 'uSkyTop', 'uSkyBot', 'uSunCol'];
+  'uTime', 'uShadow', 'uShInfo', 'uSkyTop', 'uSkyBot', 'uSunCol', 'uSunLight', 'uAmbLo', 'uAmbHi'];
 const progCache = new Map();
 function getProg(key, make) {
   let p = progCache.get(key);
@@ -679,6 +685,9 @@ function beginFrame(eye, target, fovy) {
     gl.uniform2fv(u.uFog, R.fog);
     gl.uniform1f(u.uTime, R.time);
     setSkyUniforms(u);
+    gl.uniform3fv(u.uSunLight, R.lightCol);
+    gl.uniform3fv(u.uAmbLo, R.ambLo);
+    gl.uniform3fv(u.uAmbHi, R.ambHi);
     gl.uniform1i(u.uShadow, 1);
     if (R.shadowOn && R.sh) {
       gl.uniformMatrix4fv(u.uLVP, false, R.sh.vp);

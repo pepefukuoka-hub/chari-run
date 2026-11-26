@@ -40,6 +40,10 @@ function applyStageEnv(st) {
   R.sky.top = e.top.slice(); R.sky.bottom = e.bottom.slice(); R.sky.sun = e.sun.slice();
   R.fogCol = e.fogCol.slice(); R.fog = e.fog.slice();
   R.light = v3.norm(e.light.slice());
+  const d = ENV_DEFAULT || {};
+  R.lightCol = (e.lightCol || d.lightCol || R.lightCol).slice();
+  R.ambLo = (e.ambLo || d.ambLo || R.ambLo).slice();
+  R.ambHi = (e.ambHi || d.ambHi || R.ambHi).slice();
 }
 
 function buildLevel(id) {
@@ -566,7 +570,7 @@ function drawLevel() {
 
 // ================= ステージ1「そよかぜ空島」 =================
 // 起動したときの R の空・霧・光を、このステージの色として覚えておく
-const ENV_DEFAULT = typeof R !== 'undefined' && R.sky ? { top: R.sky.top.slice(), bottom: R.sky.bottom.slice(), sun: R.sky.sun.slice(), fogCol: R.fogCol.slice(), fog: R.fog.slice(), light: R.light.slice() } : null;
+const ENV_DEFAULT = typeof R !== 'undefined' && R.sky ? { top: R.sky.top.slice(), bottom: R.sky.bottom.slice(), sun: R.sky.sun.slice(), fogCol: R.fogCol.slice(), fog: R.fog.slice(), light: R.light.slice(), lightCol: R.lightCol.slice(), ambLo: R.ambLo.slice(), ambHi: R.ambHi.slice() } : null;
 defineStage({
   id: 0, name: 'そよかぜ空島', sub: 'はじまりの草原と 風の塔',
   killY: -28, seed: 20261125, seedTotal: 8,
