@@ -42,8 +42,9 @@ const Music = (() => {
     }
   });
   const STEPS = mel.length; // 128
-  const BPM = 128;
-  const STEP = 60 / BPM / 2;
+  // 調とテンポはステージごとに変えられる（Music.setStyle）
+  let STEP = 60 / 128 / 2;
+  let pitch = 1;             // 周波数にかける倍率（調の切りかえ）
 
   const M = {
     playing: false, step: 0, next: 0, mode: 'play',
@@ -52,6 +53,14 @@ const Music = (() => {
       this.playing = true; this.step = 0; this.next = Sound.ctx.currentTime + 0.15;
     },
     stop() { this.playing = false; },
+    // key: 半音いくつ上げ下げするか、bpm: テンポ。次の音から切りかわる
+    setStyle(o) {
+      const key = (o && o.key) || 0, bpm = (o && o.bpm) || 128;
+      pitch = Math.pow(2, key / 12);
+      STEP = 60 / bpm / 2;
+      this.key = key; this.bpm = bpm;
+    },
+    key: 0, bpm: 128,
     update() {
       const ctx = Sound.ctx;
       if (!ctx || !this.playing || ctx.state !== 'running') return;
@@ -71,19 +80,19 @@ const Music = (() => {
       // メロディ：やわらかい矩形波＋1オクターブ下の三角波
       const n = mel[i];
       if (n.f) {
-        const d = n.len * STEP * 0.92;
-        Sound.voice(n.f, n.f, d + 0.05, 'square', 0.07, 0, { lp: 2200, attack: 0.01 }, bus, t);
-        Sound.voice(n.f * 0.5, n.f * 0.5, d + 0.05, 'triangle', 0.09, 0, { attack: 0.01 }, bus, t);
+        const d = n.len * STEP * 0.92, f = n.f * pitch;
+        Sound.voice(f, f, d + 0.05, 'square', 0.07, 0, { lp: 2200, attack: 0.01 }, bus, t);
+        Sound.voice(f * 0.5, f * 0.5, d + 0.05, 'triangle', 0.09, 0, { attack: 0.01 }, bus, t);
       }
       // ベース：ルート→5度（ぽんぽん跳ねる）
       if (s8 % 2 === 0) {
-        const root = ch[0];
+        const root = ch[0] * pitch;
         const f = s8 === 2 || s8 === 6 ? root * 1.5 : root;
         Sound.voice(f, f, STEP * 1.6, 'triangle', 0.32, 0, { attack: 0.005 }, bus, t);
       }
       // 和音のきざみ（裏拍）
       if (s8 % 2 === 1) {
-        for (let k = 1; k < 4; k++) Sound.voice(ch[k], ch[k], STEP * 0.7, 'square', 0.022, 0, { lp: 1600, attack: 0.004 }, bus, t);
+        for (let k = 1; k < 4; k++) Sound.voice(ch[k] * pitch, ch[k] * pitch, STEP * 0.7, 'square', 0.022, 0, { lp: 1600, attack: 0.004 }, bus, t);
       }
       // 打楽器：バスドラ（1・3拍目）、シェイカー（毎回）、スネア（2・4拍目）
       if (s8 === 0 || s8 === 4) Sound.voice(150, 45, 0.16, 'sine', 0.45, 0, null, bus, t);
