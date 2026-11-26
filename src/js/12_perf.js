@@ -7,11 +7,12 @@
 //   fx      粒子の量の倍率
 //   clouds  空のすじ雲（2 ふつう / 1 簡単 / 0 なし）
 //   lodK    あらいメッシュに切りかえる距離の倍率（大きいほど近くから切りかえる）
+//   hud     画面の文字・ボタン（2D の HUD）の解像度の上限。文字がぼやけないよう 3D より高めにする
 const PERF_TIERS = [
-  { name: '高', dpr: 2, shadow: 2048, pcf: 5, shRange: 1, fx: 1, clouds: 2, lodK: 1 },
-  { name: '中', dpr: 1.5, shadow: 1024, pcf: 3, shRange: 0.9, fx: 0.75, clouds: 2, lodK: 1.5 },
-  { name: '低', dpr: 1, shadow: 1024, pcf: 1, shRange: 0.75, fx: 0.5, clouds: 1, lodK: 2.5 },
-  { name: '最低', dpr: 0.75, shadow: 512, pcf: 1, shRange: 0.6, fx: 0.35, clouds: 0, lodK: 4 },
+  { name: '高', dpr: 2, shadow: 2048, pcf: 5, shRange: 1, fx: 1, clouds: 2, lodK: 1, hud: 2 },
+  { name: '中', dpr: 1.5, shadow: 1024, pcf: 3, shRange: 0.9, fx: 0.75, clouds: 2, lodK: 1.5, hud: 2 },
+  { name: '低', dpr: 1, shadow: 1024, pcf: 1, shRange: 0.75, fx: 0.5, clouds: 1, lodK: 2.5, hud: 1.5 },
+  { name: '最低', dpr: 0.75, shadow: 512, pcf: 1, shRange: 0.6, fx: 0.35, clouds: 0, lodK: 4, hud: 1.25 },
 ];
 const PERF_MODES = ['auto', 'high', 'mid', 'low'];
 const PERF_MODE_TIER = { high: 0, mid: 1, low: 2 };

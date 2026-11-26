@@ -424,33 +424,58 @@ function render() {
 }
 
 // ---------------- 画面の文字・ボタン ----------------
+// HUD の解像度：端末の dpr（2 まで）を、画質の段階（Perf.q.hud）でさらにおさえる
 let hudW = 0, hudH = 0, hudDpr = 1;
+// 大きさを合わせる。キャンバスを作り直した（中身と描画の設定が消えた）ときは true を返す
 function resizeHud() {
-  hudDpr = Math.min(window.devicePixelRatio || 1, 2);
+  hudDpr = Math.min(window.devicePixelRatio || 1, 2, (Perf.q && Perf.q.hud) || 2);
   const w = window.innerWidth, h = window.innerHeight;
-  if (w !== hudW || h !== hudH || hudCanvas.width !== Math.floor(w * hudDpr)) {
+  const cw = Math.floor(w * hudDpr), ch = Math.floor(h * hudDpr);
+  if (w !== hudW || h !== hudH || hudCanvas.width !== cw || hudCanvas.height !== ch) {
     hudW = w; hudH = h;
-    hudCanvas.width = Math.floor(w * hudDpr);
-    hudCanvas.height = Math.floor(h * hudDpr);
+    hudCanvas.width = cw;
+    hudCanvas.height = ch;
     layoutTouch(w, h);
+    hudState.reset();
+    return true;
   }
+  return false;
 }
 window.addEventListener('orientationchange', () => { hudW = 0; });
 
 const FONT_FAMILY = '"Hiragino Maru Gothic ProN","Hiragino Kaku Gothic ProN","BIZ UDPGothic","Noto Sans JP",sans-serif';
 const fontCache = new Map();
+// キャンバスの設定（フォント・そろえ方）を覚えておき、同じ値を何度も入れない。
+// 文字の縦そろえ（middle）と線のつなぎ目（round）は、キャンバスを作り直したときに1回だけ入れる。
+// hud.restore() で設定が元に戻るので、restore のあとは hudRestore() で覚えた値を捨てる
+const hudState = {
+  font: '', align: '',
+  reset() { this.font = ''; this.align = ''; hud.textBaseline = 'middle'; hud.lineJoin = 'round'; },
+};
+function hudRestore() { hud.restore(); hudState.font = ''; hudState.align = ''; }
 function setFont(size) {
   const k = Math.round(size * 2);
   let f = fontCache.get(k);
   if (!f) { f = 'bold ' + k / 2 + 'px ' + FONT_FAMILY; fontCache.set(k, f); }
-  hud.font = f;
+  if (hudState.font !== f) { hud.font = f; hudState.font = f; }
+  return k;
+}
+// 文字の幅（大きさと文字列ごとに覚える。タイムのように毎回変わる文字で増えすぎたら捨てる）
+const measureCache = new Map();
+function measure(s, size) {
+  const key = setFont(size) + '|' + s;
+  let w = measureCache.get(key);
+  if (w === undefined) {
+    if (measureCache.size > 400) measureCache.clear();
+    w = hud.measureText(s).width;
+    measureCache.set(key, w);
+  }
+  return w;
 }
 
 function txt(s, x, y, size, color = '#fff', align = 'left', stroke = 'rgba(40,50,90,.9)') {
   setFont(size);
-  hud.textAlign = align;
-  hud.textBaseline = 'middle';
-  hud.lineJoin = 'round';
+  if (hudState.align !== align) { hud.textAlign = align; hudState.align = align; }
   if (stroke) {
     hud.lineWidth = Math.max(3, size * 0.24);
     hud.strokeStyle = stroke;
@@ -461,8 +486,7 @@ function txt(s, x, y, size, color = '#fff', align = 'left', stroke = 'rgba(40,50
 }
 // 幅に収まるように文字を小さくする
 function txtFit(s, x, y, size, maxW, color, align, stroke) {
-  setFont(size);
-  const w = hud.measureText(s).width;
+  const w = measure(s, size);
   if (w > maxW) size = Math.max(9, size * maxW / w);
   txt(s, x, y, size, color, align, stroke);
 }
@@ -596,15 +620,293 @@ function drawHelp(W, H) {
   if (Math.floor(Game.time * 2) % 2 === 0) txt(touch ? 'タップでとじる' : 'Enter / Esc でとじる', W / 2, py + ph - 14, fs, '#999', 'center', null);
 }
 
+// ---------------- HUD の描き直しを減らす ----------------
+// 遊んでいる間（play）は、体力・どんぐり・種・タイム・タッチのボタン・スティックを「区画」に分け、
+// 前のフレームから中身が変わった区画だけを消して描き直す（どれも変わらなければ何もしない）。
+// 消す範囲がほかの表示と重なるとき、メッセージ・赤いふち・画面の大きさなど区画にしていない物が変わったとき、
+// メニューや演出の画面（毎フレーム動く）では、これまでどおり全体を描き直す。
+// 区画は重ならないので、どちらの描き方でも同じ絵になる（KORON.hud.forceFull = true で毎回全体を描く）
+const HudStat = {
+  frames: 0, full: 0, part: 0, skip: 0, regions: 0, // フレーム数・全体／一部を描いた回数・描かなかった回数・描いた区画の数
+  ms: 0, msSum: 0, msMax: 0,                        // drawHud にかかった時間（ミリ秒。ms はならした値）
+  forceFull: false,
+  why: { menu: 0, rest: 0, overlap: 0, other: 0 }, // 全体を描いたわけ（メニューなどの画面／区画にしていない物が変わった／重なった／大きさが変わった など）
+  reset() { this.frames = this.full = this.part = this.skip = this.regions = 0; this.msSum = this.msMax = 0; for (const k in this.why) this.why[k] = 0; },
+};
+setTimeout(() => { if (window.KORON) window.KORON.hud = HudStat; }, 0);
+// 区画：on/key/x0..y1 が前に描いたもの、n〜 がこのフレームのもの（座標は端末ピクセル）
+const hudRegs = [];
+const hudRegMap = {};
+function hudReg(name, draw) {
+  let r = hudRegMap[name];
+  if (!r) {
+    r = hudRegMap[name] = { name, draw, arg: null, on: false, key: '', x0: 0, y0: 0, x1: 0, y1: 0, nOn: false, nKey: '', nx0: 0, ny0: 0, nx1: 0, ny1: 0, ch: false, ux0: 0, uy0: 0, ux1: 0, uy1: 0 };
+    hudRegs.push(r);
+  }
+  return r;
+}
+// このフレームの区画を決める（x, y, w, h は CSS ピクセル。端末ピクセルに丸める）
+function hudRegSet(name, draw, key, x, y, w, h, arg) {
+  const r = hudReg(name, draw);
+  const d = hudDpr;
+  r.nOn = true; r.nKey = key; r.arg = arg === undefined ? null : arg;
+  r.nx0 = Math.round(x * d); r.ny0 = Math.round(y * d); r.nx1 = Math.round((x + w) * d); r.ny1 = Math.round((y + h) * d);
+}
+// 区画にしていない表示（メッセージ・縦向きの案内）の範囲。区画がこれと重なるときは一部だけ描けない
+const hudOthers = [];
+let hudOthersN = 0;
+function hudOtherAdd(x, y, w, h) {
+  let o = hudOthers[hudOthersN];
+  if (!o) o = hudOthers[hudOthersN] = { x0: 0, y0: 0, x1: 0, y1: 0 };
+  const d = hudDpr;
+  o.x0 = Math.floor(x * d); o.y0 = Math.floor(y * d); o.x1 = Math.ceil((x + w) * d); o.y1 = Math.ceil((y + h) * d);
+  hudOthersN++;
+}
+const rectHit = (ax0, ay0, ax1, ay1, bx0, by0, bx1, by1) => ax0 < bx1 && bx0 < ax1 && ay0 < by1 && by0 < ay1;
+let hudRest = '', hudValid = false;
+
+// 遊んでいる間の HUD の配置（毎フレーム中身だけ書きかえる）
+const HL = { L: 0, T0: 0, hs: 0, fs: 0, small: false, portrait: false, hx: 0, ay: 0, pop: 1, aw: 0, acStr: '', n: 0, sw: 0, seedX: 0, seedY: 0, oldN: 0, tStr: '', tX: 0, tY: 0 };
+function hudLayout(W, H, S, small, fs) {
+  const lay = HL;
+  lay.small = small; lay.fs = fs;
+  lay.L = S.l + 12; lay.T0 = S.t + 10;
+  lay.hs = small ? 26 : 30;
+  lay.hx = Math.sin(Game.time * 60) * Game.heartShake * 4;
+  const hs = lay.hs, L = lay.L, T0 = lay.T0;
+  // 体力
+  const danger = P.hp === 1 ? 1 + Math.sin(Game.time * 9) * 0.12 : 1;
+  const hw = P.maxHp * (hs + 6) + 14;
+  hudRegSet('heart', drawHudHearts, P.hp + ',' + P.maxHp + ',' + lay.hx + ',' + danger, L - 4, T0 - 4, hw + 8, hs + 21);
+  // どんぐり（数が増えたときに大きくはねる分も入れる）
+  lay.ay = T0 + hs + 22;
+  lay.pop = 1 + Game.acornPop * 0.35;
+  lay.acStr = '× ' + Game.acorns;
+  lay.aw = measure(lay.acStr, fs + 2);
+  const aw = lay.aw;
+  hudRegSet('acorn', drawHudAcorns, lay.acStr + ',' + lay.pop, L - 4, lay.ay - 5, Math.max(aw + 50, 38 + aw * 1.4 + 8) + 8, hs + 18);
+  // 種
+  lay.n = Level.seedTotal;
+  lay.sw = lay.n * 26 + 18;
+  lay.portrait = H > W;
+  lay.seedY = lay.portrait ? T0 + hs + 22 + hs + 22 : T0;
+  lay.seedX = lay.portrait ? L : W / 2 - lay.sw / 2;
+  let oldN = 0;
+  for (const q of Level.seeds) if (q.old && !q.got) oldN++;
+  lay.oldN = oldN;
+  hudRegSet('seed', drawHudSeeds, lay.n + ',' + Game.seeds + ',' + oldN, lay.seedX - 4, lay.seedY - 4, lay.sw + 8, hs + 22);
+  // タイム
+  const touchUI = Input.touchMode && (Game.state === 'play' || Game.state === 'pause');
+  const tx = touchUI ? (Input.btns.camera ? Input.btns.camera.x - 32 : W - 130) : W - S.r - 14;
+  lay.tStr = fmtTime(Game.playTime);
+  const tw = measure(lay.tStr, fs);
+  // せまい横画面では種の表示とぶつかるので、1段下へ
+  const tLow = !lay.portrait && tx - tw < lay.seedX + lay.sw + 6;
+  lay.tX = tLow ? W - S.r - 14 : tx;
+  lay.tY = tLow ? T0 + hs + 14 + 20 : T0 + (hs + 14) / 2;
+  hudRegSet('time', drawHudTime, lay.tStr + ',' + lay.tX + ',' + lay.tY, lay.tX - tw - 5, lay.tY - fs * 0.75 - 3, tw + 10, fs * 1.5 + 6);
+  return lay;
+}
+function drawHudHearts(lay) {
+  const L = lay.L, T0 = lay.T0, hs = lay.hs;
+  panel(L, T0, P.maxHp * (hs + 6) + 14, hs + 14, (hs + 14) / 2);
+  for (let i = 0; i < P.maxHp; i++) {
+    const danger = P.hp === 1 && i === 0 ? 1 + Math.sin(Game.time * 9) * 0.12 : 1;
+    drawHeartIcon(L + 7 + hs / 2 + 3 + i * (hs + 6) + lay.hx, T0 + (hs + 14) / 2 + 1, hs * danger, i < P.hp);
+  }
+}
+function drawHudAcorns(lay) {
+  const L = lay.L, ay = lay.ay, hs = lay.hs, fs = lay.fs, pop = lay.pop;
+  panel(L, ay, lay.aw + 50, hs + 8, (hs + 8) / 2);
+  drawAcornIcon(L + 20, ay + (hs + 8) / 2, 24 * pop);
+  txt(lay.acStr, L + 38, ay + (hs + 8) / 2 + 1, (fs + 2) * pop, Game.acornPop > 0 ? '#ffe08a' : '#fff');
+}
+function drawHudSeeds(lay) {
+  const n = lay.n, seedX = lay.seedX, seedY = lay.seedY, hs = lay.hs;
+  panel(seedX, seedY, lay.sw, hs + 14, (hs + 14) / 2);
+  // 明るい：このプレイで取った／うすい：前に取ったことがある／から：まだ
+  for (let i = 0; i < n; i++) {
+    const x = seedX + 22 + i * 26, y = seedY + (hs + 14) / 2;
+    if (i < Game.seeds) drawSeedIcon(x, y, 22, true, true);
+    else if (i < Game.seeds + lay.oldN) { hud.globalAlpha = 0.45; drawSeedIcon(x, y, 22, true, false); hud.globalAlpha = 1; }
+    else drawSeedIcon(x, y, 22, false, false);
+  }
+}
+function drawHudTime(lay) { txt(lay.tStr, lay.tX, lay.tY, lay.fs, '#fff', 'right'); }
+
+// タッチ操作のボタンとスティックの区画
+function hudTouchLayout() {
+  for (const k in Input.btns) {
+    const b = Input.btns[k];
+    const e = b.r + 3;
+    hudRegSet('b:' + k, drawTouchBtn, b.down + ',' + b.x + ',' + b.y + ',' + b.r, b.x - e, b.y - e, e * 2, e * 2, k);
+  }
+  const R0 = Input.stickR;
+  if (Input.stick) {
+    const s = Input.stick;
+    let dx = s.x - s.ox, dy = s.y - s.oy; const d = Math.hypot(dx, dy);
+    if (d > R0) { dx *= R0 / d; dy *= R0 / d; }
+    const e = R0 * 1.45 + 3;
+    hudRegSet('stick', drawTouchStick, s.ox + ',' + s.oy + ',' + dx + ',' + dy + ',' + R0, s.ox - e, s.oy - e, e * 2, e * 2);
+  } else {
+    const hx = Input.stickHome.x, hy = Input.stickHome.y, e = R0 + 3;
+    hudRegSet('stick', drawTouchStick, 'h' + hx + ',' + hy + ',' + R0 + ',' + (Game.playTime < 20), hx - e, hy - e, e * 2, e * 2);
+  }
+}
+function drawTouchBtn(k) {
+  const b = Input.btns[k];
+  if (!b) return;
+  const r = b.r * (b.down ? 0.92 : 1);
+  hud.beginPath();
+  hud.arc(b.x, b.y, r, 0, TAU);
+  if (b.small) hud.fillStyle = b.down ? 'rgba(255,255,255,.6)' : 'rgba(30,50,100,.35)';
+  else hud.fillStyle = b.down ? 'rgba(255,255,255,.65)' : 'rgba(255,255,255,.2)';
+  hud.fill();
+  hud.lineWidth = b.small ? 2 : 3;
+  hud.strokeStyle = b.col || 'rgba(255,255,255,.8)';
+  hud.stroke();
+  if (b.small) txt(b.label, b.x, b.y + 1, k === 'pause' ? 16 : 10, '#fff', 'center');
+  else txtFit(b.label, b.x, b.y + 1, Math.max(12, b.r * 0.34), b.r * 1.8, '#fff', 'center');
+}
+function drawTouchStick() {
+  const R0 = Input.stickR;
+  if (Input.stick) {
+    const s = Input.stick;
+    hud.beginPath(); hud.arc(s.ox, s.oy, R0, 0, TAU);
+    hud.fillStyle = 'rgba(255,255,255,.15)'; hud.fill();
+    hud.strokeStyle = 'rgba(255,255,255,.55)'; hud.lineWidth = 2.5; hud.stroke();
+    let dx = s.x - s.ox, dy = s.y - s.oy; const d = Math.hypot(dx, dy);
+    if (d > R0) { dx *= R0 / d; dy *= R0 / d; }
+    hud.beginPath(); hud.arc(s.ox + dx, s.oy + dy, R0 * 0.45, 0, TAU);
+    hud.fillStyle = 'rgba(255,255,255,.7)'; hud.fill();
+  } else {
+    // さわっていないときは、いつもの場所にうっすら表示
+    const hx = Input.stickHome.x, hy = Input.stickHome.y;
+    hud.beginPath(); hud.arc(hx, hy, R0, 0, TAU);
+    hud.fillStyle = 'rgba(255,255,255,.08)'; hud.fill();
+    hud.strokeStyle = 'rgba(255,255,255,.35)'; hud.lineWidth = 2; hud.stroke();
+    hud.beginPath(); hud.arc(hx, hy, R0 * 0.45, 0, TAU);
+    hud.fillStyle = 'rgba(255,255,255,.25)'; hud.fill();
+    if (Game.playTime < 20) txt('いどう', hx, hy, 13, 'rgba(255,255,255,.9)', 'center');
+  }
+}
+function drawTouchUI() {
+  for (const k in Input.btns) drawTouchBtn(k);
+  drawTouchStick();
+}
+
+// 変わった区画だけを描く。できないとき（重なる）は false
+function hudPartial() {
+  let changed = 0;
+  for (const r of hudRegs) {
+    r.ch = (r.on || r.nOn) && (r.on !== r.nOn || r.key !== r.nKey || r.x0 !== r.nx0 || r.y0 !== r.ny0 || r.x1 !== r.nx1 || r.y1 !== r.ny1);
+    if (!r.ch) continue;
+    changed++;
+    // 消す範囲：前に描いた範囲と、こんど描く範囲を合わせたもの
+    if (r.on && r.nOn) { r.ux0 = Math.min(r.x0, r.nx0); r.uy0 = Math.min(r.y0, r.ny0); r.ux1 = Math.max(r.x1, r.nx1); r.uy1 = Math.max(r.y1, r.ny1); }
+    else if (r.on) { r.ux0 = r.x0; r.uy0 = r.y0; r.ux1 = r.x1; r.uy1 = r.y1; }
+    else { r.ux0 = r.nx0; r.uy0 = r.ny0; r.ux1 = r.nx1; r.uy1 = r.ny1; }
+  }
+  if (!changed) return true;
+  // 重なりを調べる
+  for (const r of hudRegs) {
+    if (!r.ch) continue;
+    for (const q of hudRegs) {
+      if (q === r) continue;
+      if (q.on && rectHit(r.ux0, r.uy0, r.ux1, r.uy1, q.x0, q.y0, q.x1, q.y1)) return false;
+      if (q.nOn && rectHit(r.ux0, r.uy0, r.ux1, r.uy1, q.nx0, q.ny0, q.nx1, q.ny1)) return false;
+    }
+    for (let i = 0; i < hudOthersN; i++) {
+      const o = hudOthers[i];
+      if (rectHit(r.ux0, r.uy0, r.ux1, r.uy1, o.x0, o.y0, o.x1, o.y1)) return false;
+    }
+  }
+  const d = hudDpr;
+  for (const r of hudRegs) {
+    if (!r.ch) continue;
+    const w = r.ux1 - r.ux0, h = r.uy1 - r.uy0;
+    hud.save();
+    hud.setTransform(1, 0, 0, 1, 0, 0);
+    hud.clearRect(r.ux0, r.uy0, w, h);
+    if (r.nOn) {
+      hud.beginPath(); hud.rect(r.ux0, r.uy0, w, h); hud.clip();
+      hud.setTransform(d, 0, 0, d, 0, 0);
+      r.draw(r.arg === null ? HL : r.arg);
+      HudStat.regions++;
+    }
+    hudRestore();
+  }
+  return true;
+}
+function hudCommit() {
+  for (const r of hudRegs) {
+    r.on = r.nOn; r.key = r.nKey;
+    r.x0 = r.nx0; r.y0 = r.ny0; r.x1 = r.nx1; r.y1 = r.ny1;
+  }
+}
+
 function drawHud() {
-  resizeHud();
-  hud.setTransform(hudDpr, 0, 0, hudDpr, 0, 0);
-  hud.clearRect(0, 0, hudW, hudH);
+  const t0 = performance.now();
+  const resized = resizeHud();
   const W = hudW, H = hudH;
   const S = Input.safe;
   const small = Math.min(W, H) < 500;
   const fs = small ? 16 : 20;
+  HudStat.frames++;
+  for (const r of hudRegs) r.nOn = false;
+  hudOthersN = 0;
+  const st = Game.state;
+  let lay = null, rest = '';
+  // ---- 遊んでいる間：変わった区画だけ描けるか ----
+  if (R.ok && st !== 'title' && st !== 'erase' && st !== 'select') {
+    lay = hudLayout(W, H, S, small, fs);
+    if (st === 'play' && !Game.help) {
+      if (Input.touchMode) hudTouchLayout();
+      // 区画にしていない物（メッセージ・赤いふち・縦向きの案内・画面の大きさ）
+      rest = W + 'x' + H + '@' + hudDpr + '|' + S.l + ',' + S.t + ',' + S.r + ',' + S.b + '|' + Input.touchMode + '|' + Game.hurtFlash;
+      for (let i = 0; i < Game.toasts.length; i++) {
+        const t = Game.toasts[i];
+        const a = Math.min(1, t.t * 5, (t.dur - t.t) * 2);
+        const yy = (lay.portrait ? H * 0.3 : H * 0.22) + i * (fs + 20) - (1 - Math.min(1, t.t * 5)) * 10;
+        const tw = Math.min(measure(t.msg, fs + 1), W - 40);
+        hudOtherAdd(W / 2 - tw / 2 - 18, yy - (fs + 12) / 2 - 3, tw + 36, fs + 18);
+        rest += '|' + t.msg + ',' + a + ',' + yy;
+      }
+      if (Input.touchMode && lay.portrait && Game.portraitHintT > 0) {
+        hudOtherAdd(W / 2 - 132, H * 0.55 - 2, 264, 38);
+        rest += '|h' + Math.min(1, Game.portraitHintT);
+      }
+      const can = !resized && hudValid && !HudStat.forceFull;
+      if (can && rest !== hudRest) HudStat.why.rest++;
+      else if (can && !hudPartial()) HudStat.why.overlap++;
+      else if (can) {
+        hudCommit();
+        let n = 0;
+        for (const r of hudRegs) if (r.ch) n++;
+        if (n) HudStat.part++; else HudStat.skip++;
+        hudTime(t0);
+        return;
+      } else HudStat.why.other++;
+    } else HudStat.why.menu++;
+  } else HudStat.why.menu++;
+  // ---- 全体を描き直す ----
+  HudStat.full++;
+  hud.setTransform(hudDpr, 0, 0, hudDpr, 0, 0);
+  hud.clearRect(0, 0, hudW, hudH);
+  drawHudAll(W, H, S, small, fs, lay);
+  hudValid = st === 'play' && !Game.help && R.ok;
+  hudRest = rest;
+  hudCommit();
+  hudTime(t0);
+}
+function hudTime(t0) {
+  const ms = performance.now() - t0;
+  HudStat.msSum += ms;
+  if (ms > HudStat.msMax) HudStat.msMax = ms;
+  HudStat.ms = lerp(HudStat.ms, ms, 0.05);
+}
 
+function drawHudAll(W, H, S, small, fs, lay) {
   if (!R.ok) {
     txt('この端末では 3D 表示（WebGL2）が使えません', W / 2, H / 2, 18, '#fff', 'center');
     return;
@@ -614,47 +916,12 @@ function drawHud() {
   if (Game.state === 'select') { drawSelect(W, H, fs, small); return; }
   if (Game.state === 'ending') { drawEnding(W, H, fs, small); return; }
 
-  // ---- 体力 ----
-  const L = S.l + 12, T0 = S.t + 10;
-  const hs = small ? 26 : 30;
-  const hx = Math.sin(Game.time * 60) * Game.heartShake * 4;
-  panel(L, T0, P.maxHp * (hs + 6) + 14, hs + 14, (hs + 14) / 2);
-  for (let i = 0; i < P.maxHp; i++) {
-    const danger = P.hp === 1 && i === 0 ? 1 + Math.sin(Game.time * 9) * 0.12 : 1;
-    drawHeartIcon(L + 7 + hs / 2 + 3 + i * (hs + 6) + hx, T0 + (hs + 14) / 2 + 1, hs * danger, i < P.hp);
-  }
-  // ---- どんぐり ----
-  const ay = T0 + hs + 22;
-  const pop = 1 + Game.acornPop * 0.35;
-  setFont(fs + 2);
-  const aw = hud.measureText('× ' + Game.acorns).width;
-  panel(L, ay, aw + 50, hs + 8, (hs + 8) / 2);
-  drawAcornIcon(L + 20, ay + (hs + 8) / 2, 24 * pop);
-  txt('× ' + Game.acorns, L + 38, ay + (hs + 8) / 2 + 1, (fs + 2) * pop, Game.acornPop > 0 ? '#ffe08a' : '#fff');
-  // ---- 種 ----
-  const n = Level.seedTotal;
-  const sw = n * 26 + 18;
-  const portrait = H > W;
-  const seedY = portrait ? T0 + hs + 22 + hs + 22 : T0;
-  const seedX = portrait ? L : W / 2 - sw / 2;
-  panel(seedX, seedY, sw, hs + 14, (hs + 14) / 2);
-  // 明るい：このプレイで取った／うすい：前に取ったことがある／から：まだ
-  let oldN = 0;
-  for (const q of Level.seeds) if (q.old && !q.got) oldN++;
-  for (let i = 0; i < n; i++) {
-    const x = seedX + 22 + i * 26, y = seedY + (hs + 14) / 2;
-    if (i < Game.seeds) drawSeedIcon(x, y, 22, true, true);
-    else if (i < Game.seeds + oldN) { hud.globalAlpha = 0.45; drawSeedIcon(x, y, 22, true, false); hud.globalAlpha = 1; }
-    else drawSeedIcon(x, y, 22, false, false);
-  }
-  // ---- タイム ----
-  const touchUI = Input.touchMode && (Game.state === 'play' || Game.state === 'pause');
-  const tx = touchUI ? (Input.btns.camera ? Input.btns.camera.x - 32 : W - 130) : W - S.r - 14;
-  const tStr = fmtTime(Game.playTime);
-  setFont(fs);
-  // せまい横画面では種の表示とぶつかるので、1段下へ
-  const tLow = !portrait && tx - hud.measureText(tStr).width < seedX + sw + 6;
-  txt(tStr, tLow ? W - S.r - 14 : tx, tLow ? T0 + hs + 14 + 20 : T0 + (hs + 14) / 2, fs, '#fff', 'right');
+  // ---- 体力・どんぐり・種・タイム ----
+  drawHudHearts(lay);
+  drawHudAcorns(lay);
+  drawHudSeeds(lay);
+  drawHudTime(lay);
+  const T0 = lay.T0, hs = lay.hs, portrait = lay.portrait, seedY = lay.seedY;
 
   // ---- メッセージ ----
   // 種ゲットの演出中は、見出しと重なるので出さない
@@ -664,8 +931,7 @@ function drawHud() {
     const a = Math.min(1, t.t * 5, (t.dur - t.t) * 2);
     const yy = (portrait ? H * 0.3 : H * 0.22) + i * (fs + 20) - (1 - Math.min(1, t.t * 5)) * 10;
     hud.globalAlpha = a;
-    setFont(fs + 1);
-    const tw = Math.min(hud.measureText(t.msg).width, W - 40);
+    const tw = Math.min(measure(t.msg, fs + 1), W - 40);
     panel(W / 2 - tw / 2 - 16, yy - (fs + 12) / 2, tw + 32, fs + 12, (fs + 12) / 2, 'rgba(255,255,255,.88)', null);
     txtFit(t.msg, W / 2, yy + 1, fs + 1, W - 40, '#2c3e70', 'center', null);
     hud.globalAlpha = 1;
@@ -757,14 +1023,13 @@ function drawTitle(W, H, fs, small) {
   // ロゴ：1文字ずつ少しずつ揺らす
   txt('ころんの', W / 2, ty - ts * 0.2 + bob, ts * 0.55, '#fff6d8', 'center');
   const title = '空島アドベンチャー';
-  setFont(ts);
-  const tw = Math.min(hud.measureText(title).width, W - 30);
-  const k = tw / hud.measureText(title).width;
+  const tw0 = measure(title, ts);
+  const tw = Math.min(tw0, W - 30);
+  const k = tw / tw0;
   let x = W / 2 - tw / 2;
   for (let i = 0; i < title.length; i++) {
     const ch = title[i];
-    setFont(ts * k);
-    const cw = hud.measureText(ch).width;
+    const cw = measure(ch, ts * k);
     const yy = ty + ts * 0.85 + Math.sin(Game.time * 3 + i * 0.6) * 4;
     txt(ch, x + cw / 2, yy, ts * k, i < 2 ? '#8ee0ff' : '#ffd166', 'center', 'rgba(40,50,90,.95)');
     x += cw;
@@ -864,7 +1129,7 @@ function drawSelect(W, H, fs, small) {
       yy += lh * 0.8;
       txtFit('ひかりの種を ' + u.seeds + 'こ 集めると ひらく（いま ' + Save.count(u.stage) + 'こ）', x + cw / 2, yy, small ? 12 : 14, cw - 20, '#ffe9a8', 'center', null);
     }
-    hud.restore();
+    hudRestore();
     const r = menuRects[i];
     r.x = x; r.y = y; r.w = cw; r.h = ch; r.on = true;
   }
@@ -922,45 +1187,6 @@ function drawClear(W, H, fs, small) {
     txt('どんぐり ' + Game.acorns + ' / ' + Level.acornTotal, W / 2, cy + 36 + ph * 0.78, fs, '#7a5230', 'center', null);
     if (Game.stT > 3) drawMenu(MENUS.clear, W / 2, cy + 36 + ph + 16, W, H);
   }
-}
-
-function drawTouchUI() {
-  hud.save();
-  for (const k in Input.btns) {
-    const b = Input.btns[k];
-    const r = b.r * (b.down ? 0.92 : 1);
-    hud.beginPath();
-    hud.arc(b.x, b.y, r, 0, TAU);
-    if (b.small) hud.fillStyle = b.down ? 'rgba(255,255,255,.6)' : 'rgba(30,50,100,.35)';
-    else hud.fillStyle = b.down ? 'rgba(255,255,255,.65)' : 'rgba(255,255,255,.2)';
-    hud.fill();
-    hud.lineWidth = b.small ? 2 : 3;
-    hud.strokeStyle = b.col || 'rgba(255,255,255,.8)';
-    hud.stroke();
-    if (b.small) txt(b.label, b.x, b.y + 1, k === 'pause' ? 16 : 10, '#fff', 'center');
-    else txtFit(b.label, b.x, b.y + 1, Math.max(12, b.r * 0.34), b.r * 1.8, '#fff', 'center');
-  }
-  const R0 = Input.stickR;
-  if (Input.stick) {
-    const s = Input.stick;
-    hud.beginPath(); hud.arc(s.ox, s.oy, R0, 0, TAU);
-    hud.fillStyle = 'rgba(255,255,255,.15)'; hud.fill();
-    hud.strokeStyle = 'rgba(255,255,255,.55)'; hud.lineWidth = 2.5; hud.stroke();
-    let dx = s.x - s.ox, dy = s.y - s.oy; const d = Math.hypot(dx, dy);
-    if (d > R0) { dx *= R0 / d; dy *= R0 / d; }
-    hud.beginPath(); hud.arc(s.ox + dx, s.oy + dy, R0 * 0.45, 0, TAU);
-    hud.fillStyle = 'rgba(255,255,255,.7)'; hud.fill();
-  } else {
-    // さわっていないときは、いつもの場所にうっすら表示
-    const hx = Input.stickHome.x, hy = Input.stickHome.y;
-    hud.beginPath(); hud.arc(hx, hy, R0, 0, TAU);
-    hud.fillStyle = 'rgba(255,255,255,.08)'; hud.fill();
-    hud.strokeStyle = 'rgba(255,255,255,.35)'; hud.lineWidth = 2; hud.stroke();
-    hud.beginPath(); hud.arc(hx, hy, R0 * 0.45, 0, TAU);
-    hud.fillStyle = 'rgba(255,255,255,.25)'; hud.fill();
-    if (Game.playTime < 20) txt('いどう', hx, hy, 13, 'rgba(255,255,255,.9)', 'center');
-  }
-  hud.restore();
 }
 
 // ---------------- メインループ ----------------
