@@ -24,6 +24,7 @@ defineStage({
   cloud: { lo: hex(0xc4a2c6), far: hex(0xf6b496), top: hex(0xffe2d2) },
   titleCam: { r: 62, y: 28, tx: 0, ty: 3, tz: 0 },
   color: '#ffb38a',
+  arenaName: 'ゆきだるん', // 広場の敵の呼び名（「〇〇 のこり 2 ひき」）
   unlock: { stage: 0, seeds: 4 },
   build: buildStage2,
 });
@@ -42,7 +43,6 @@ function buildStage2(K) {
   void onceStage;
   const S2 = Level.s2 = { windT: 0, gustOn: false, slab: null, broken: false, icicles: [], balls: [], lamps: [], crystals: [] };
   Level.arenaSeed = { id: 5, msg: 'ゆきだるんを ぜんぶ たおした！ ひかりの種が あらわれた！' };
-  Level.arenaName = 'ゆきだるん';
 
   // ---------- 色 ----------
   const SNOW = hex(0xf3f7ff), SNOW2 = hex(0xdde6f5), SNOWSH = hex(0xc9d3ea);
@@ -414,7 +414,8 @@ function updateStage2(dt) {
   // ---- 風のつり橋 ----
   S2.windT += dt;
   const gust = windGust(S2.windT);
-  if (gust > 0 && !S2.gustOn) { S2.gustOn = true; if (Sound.noise && s2near(0, -38, 30)) Sound.noise(1.7, 0.1, 500, 1500, 'bandpass', 0, 0.6); }
+  // 風の音は遊んでいる間だけ（タイトル・ステージ選びの背景では、前のプレイの主人公の位置で鳴ってしまう）
+  if (gust > 0 && !S2.gustOn) { S2.gustOn = true; if (playing && Sound.noise && s2near(0, -38, 30)) Sound.noise(1.7, 0.1, 500, 1500, 'bandpass', 0, 0.6); }
   if (gust <= 0) S2.gustOn = false;
   S2.gust = gust;
   const B = S2.bridge;
@@ -476,6 +477,9 @@ function updateSnowman(e, dt) {
   e.squish = lerp(e.squish, 1, dt * 8);
   const dx = P.x - e.x, dz = P.z - e.z, dist = Math.hypot(dx, dz), dy = P.y - e.y;
   const see = dist < 14 && Math.abs(dy) < 6 && P.state !== 'dead' && P.state !== 'win';
+  // 風のつり橋の上（かげで風を待つ場所）には投げない。北の島のゆきだるんが、いちばん奥のかげに届いてしまうため
+  const B = Level.s2.bridge;
+  const onBridge = B && P.x > B.x0 && P.x < B.x1 && P.z > B.z0 && P.z < B.z1;
   if (see) e.yaw += clamp(angDiff(e.yaw, Math.atan2(dx, dz)), -dt * 3, dt * 3);
   else e.yaw += dt * 0.3;
   e.cd -= dt;
@@ -490,7 +494,7 @@ function updateSnowman(e, dt) {
       Sound.play('punch');
       e.squish = 0.85;
     }
-  } else if (see && e.cd <= 0 && dist > 2.2 && dist < 13) {
+  } else if (see && !onBridge && e.cd <= 0 && dist > 2.2 && dist < 13) {
     e.wind = 0.45; e.cd = 2.6;
   }
   // 足元（動く足場にも乗れるように）

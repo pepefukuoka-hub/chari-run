@@ -196,7 +196,7 @@ function killEnemy(e, how) {
   Level.acornTotal++;
   if (e.arena) {
     const left = Level.enemies.filter((q) => q.arena && q.alive).length;
-    if (left > 0) Game.toast(`${Level.arenaName || '高台の敵'} のこり ${left} ひき`, 2);
+    if (left > 0) Game.toast(`${(Level.stage && Level.stage.arenaName) || '高台の敵'} のこり ${left} ひき`, 2); // 呼び名はステージの定義から（前のステージの名前が残らないように）
   }
 }
 
