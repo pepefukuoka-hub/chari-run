@@ -124,21 +124,24 @@ function buildModels() {
     .mesh();
 
   // ================= どんぐり =================
-  {
+  // たくさん置かれるので、遠く用のあらい形（lod）も作る。k: 細かさ（1 がふつう）
+  const acornGeo = (k) => {
     const g = new Geo();
     const nut = (p) => mixc(COL.acornDk, COL.acorn, clamp(p[1] * 0.6 + 0.6, 0, 1));
-    g.sphere(T(0, -0.02, 0, 0.26, 0.31, 0.26), nut, 16, 12);
-    g.cyl(T(0, -0.36, 0, 0.06, 0.08, 0.06), COL.acornDk, 6, { top: 0.2, bottom: 1 }); // とがった先
+    g.sphere(T(0, -0.02, 0, 0.26, 0.31, 0.26), nut, Math.round(16 * k), Math.max(4, Math.round(12 * k)));
+    g.cyl(T(0, -0.36, 0, 0.06, 0.08, 0.06), COL.acornDk, Math.max(4, Math.round(6 * k)), { top: 0.2, bottom: 1 }); // とがった先
     // 帽子（あみ目もよう）
     const cap = (p, n) => {
       const u = Math.atan2(p[2], p[0]);
       const k = (Math.floor(u * 2.6 + p[1] * 6) + Math.floor(u * 2.6 - p[1] * 6)) % 2 === 0;
       return n[1] < -0.2 ? shade(COL.acornCap, 0.75) : k ? COL.acornCapLt : COL.acornCap;
     };
-    g.sphere(T(0, 0.15, 0, 0.3, 0.17, 0.3), cap, 16, 8, { flat: true });
-    g.cyl(T(0, 0.28, 0, 0.035, 0.13, 0.035, 0, 0, 0.25), COL.acornCap, 6);
-    Models.acorn = g.mesh();
-  }
+    g.sphere(T(0, 0.15, 0, 0.3, 0.17, 0.3), cap, Math.round(16 * k), Math.max(4, Math.round(8 * k)), { flat: true });
+    g.cyl(T(0, 0.28, 0, 0.035, 0.13, 0.035, 0, 0, 0.25), COL.acornCap, Math.max(3, Math.round(6 * k)));
+    return g;
+  };
+  Models.acorn = acornGeo(1).mesh();
+  Models.acorn.lod = [{ d: 14, mesh: acornGeo(0.6).mesh() }, { d: 30, mesh: acornGeo(0.4).mesh() }];
   // ================= ひかりの種（芽の出た光る結晶）=================
   {
     const g = new Geo();
@@ -172,10 +175,12 @@ function buildModels() {
     Models.heart = g.mesh();
   }
   // ================= 敵：もこもこ（ふわふわの紫。踏める）=================
-  {
+  // k: 細かさ（遠く用に k を小さくしたあらい形も作る）
+  const blobGeo = (k) => {
     const g = new Geo();
+    const sg = (a) => Math.max(4, Math.round(a * k));
     const fur = (p) => mixc(COL.enemyDk, COL.enemy, clamp(p[1] * 0.5 + 0.55, 0, 1));
-    g.sphere(T(0, 0.56, 0, 0.6, 0.52, 0.6), fur, 18, 12);
+    g.sphere(T(0, 0.56, 0, 0.6, 0.52, 0.6), fur, sg(18), sg(12));
     // まわりにふわふわの玉をくっつけて、もこもこの輪郭に
     for (const q of fibPoints(30)) {
       if (q[1] < -0.35) continue;
@@ -183,32 +188,36 @@ function buildModels() {
       const p = [q[0] * 0.58, 0.56 + q[1] * 0.5, q[2] * 0.58];
       const s = 0.2 + (q[1] + 1) * 0.04;
       const lt = clamp(q[1] * 0.5 + 0.5, 0, 1);
-      g.sphere(T(p[0], p[1], p[2], s, s * 0.9, s), (pp) => mixc(COL.enemyDk, mixc(COL.enemy, COL.enemyLt, lt * 0.45), clamp(pp[1] * 0.5 + 0.5 + lt * 0.3, 0, 1)), 10, 7);
+      g.sphere(T(p[0], p[1], p[2], s, s * 0.9, s), (pp) => mixc(COL.enemyDk, mixc(COL.enemy, COL.enemyLt, lt * 0.45), clamp(pp[1] * 0.5 + 0.5 + lt * 0.3, 0, 1)), sg(10), sg(7));
     }
     // 目（白目＋黒目）と、怒りまゆ
     for (const sx of [-1, 1]) {
-      g.sphere(T(sx * 0.2, 0.66, 0.5, 0.13, 0.15, 0.08, sx * 0.3), COL.white, 12, 8);
-      g.sphere(T(sx * 0.17, 0.63, 0.57, 0.06, 0.08, 0.04, sx * 0.3), COL.eye, 10, 6);
-      g.sphere(T(sx * 0.155, 0.66, 0.6, 0.02, 0.022, 0.01), COL.white, 6, 4);
+      g.sphere(T(sx * 0.2, 0.66, 0.5, 0.13, 0.15, 0.08, sx * 0.3), COL.white, sg(12), sg(8));
+      g.sphere(T(sx * 0.17, 0.63, 0.57, 0.06, 0.08, 0.04, sx * 0.3), COL.eye, sg(10), sg(6));
+      if (k >= 0.8) g.sphere(T(sx * 0.155, 0.66, 0.6, 0.02, 0.022, 0.01), COL.white, 6, 4);
       g.box(T(sx * 0.22, 0.83, 0.55, 0.2, 0.05, 0.06, sx * 0.3, 0, sx * -0.45), COL.enemyDk);
     }
     // 口とキバ
     g.arc(T(0, 0.48, 0.585, 1, 1, 1, 0, -0.2), COL.eye, 0.07, 0.014, 0.3, Math.PI - 0.3, 8, 4);
     g.cyl(T(0.05, 0.47, 0.595, 0.025, 0.05, 0.02, 0, Math.PI), COL.white, 5, { top: 0 });
     // 足
-    for (const sx of [-1, 1]) g.sphere(T(sx * 0.28, 0.09, 0.1, 0.17, 0.1, 0.22), COL.enemyDk, 10, 6);
-    Models.blob = g.mesh();
-  }
+    for (const sx of [-1, 1]) g.sphere(T(sx * 0.28, 0.09, 0.1, 0.17, 0.1, 0.22), COL.enemyDk, sg(10), sg(6));
+    return g;
+  };
+  Models.blob = blobGeo(1).mesh();
+  Models.blob.lod = [{ d: 16, mesh: blobGeo(0.6).mesh() }, { d: 34, mesh: blobGeo(0.4).mesh() }];
   // ================= 敵：トゲコロ（トゲ玉。踏めない）=================
-  {
+  const spikyGeo = (k) => {
     const g = new Geo();
-    g.sphere(T(0, 0, 0, 0.66, 0.66, 0.66), (p) => mixc(COL.spikeDk, COL.spike, p[1] * 0.4 + 0.6), 16, 12);
+    g.sphere(T(0, 0, 0, 0.66, 0.66, 0.66), (p) => mixc(COL.spikeDk, COL.spike, p[1] * 0.4 + 0.6), Math.round(16 * k), Math.max(5, Math.round(12 * k)));
     for (const q of fibPoints(26)) {
       const m = alignY([q[0] * 0.55, q[1] * 0.55, q[2] * 0.55], q, 0.17, 0.52, 0.17);
-      g.cyl(m, (p) => (p[1] > 0.62 ? COL.spikeTip : mixc(COL.spike, hex(0x8a8ca8), p[1])), 7, { top: 0, caps: false });
+      g.cyl(m, (p) => (p[1] > 0.62 ? COL.spikeTip : mixc(COL.spike, hex(0x8a8ca8), p[1])), Math.max(4, Math.round(7 * k)), { top: 0, caps: false });
     }
-    Models.spiky = g.mesh();
-  }
+    return g;
+  };
+  Models.spiky = spikyGeo(1).mesh();
+  Models.spiky.lod = [{ d: 18, mesh: spikyGeo(0.6).mesh() }];
   // ---- 影・粒・輪（他のファイルからも使う）----
   Models.shadow = new Geo().disc(T(), [0, 0, 0], 20).mesh();
   Models.puff = new Geo().sphere(T(), WHITE, 8, 6, { flat: true }).mesh();
@@ -221,6 +230,8 @@ function buildModels() {
     return g.mesh();
   })();
   Models.flagCloth = new Geo().box(T(0.5, 2.6, 0, 1, 0.6, 0.05), COL.scarf).mesh();
+  // デバッグ用の名前（R.stats で使う）
+  for (const k in Models) if (Models[k] && Models[k].count) Models[k].name = k;
 }
 
 // ---------- ころんを描く ----------
@@ -564,8 +575,7 @@ function drawPlayer() {
   }
 
   // ---- 体の行列 ----
-  const m = M4.ident();
-  M4.translate(m, P.x, P.y, P.z);
+  const m = Tt(P.x, P.y, P.z);
   M4.rotY(m, P.yaw + yawOff + spin);
   if (P.flip && st !== 'dead') {
     // 宙返り：回りすぎないよう1回転でとめ、終わりぎわはゆっくり
@@ -591,7 +601,7 @@ function drawPlayer() {
   if (roll) M4.rotZ(m, roll);
   // つぶれ・伸び（体積を保つように横も変える）
   const sxz = 1 / Math.sqrt(sq);
-  const body = M4.copy(m);
+  const body = Mt(m);
   M4.scale(body, sxz, sq, sxz);
   drawMesh(Models.body, body);
 
@@ -604,7 +614,7 @@ function drawPlayer() {
     else if (cyc % 3 === 1 && bt > 0.24 && bt < 0.38) blink = 0.08 + Math.abs(bt - 0.31) / 0.07 * 0.92;
     if (P.crouching) blink = Math.min(blink, 0.55);
     for (const sd of [-1, 1]) {
-      const e = M4.copy(body);
+      const e = Mt(body);
       M4.translate(e, sd * 0.2, 0.86, 0.474);
       M4.rotY(e, sd * 0.36);
       if (eyes === 'open') {
@@ -620,7 +630,7 @@ function drawPlayer() {
         drawMesh(Models.eyeX, e);
       }
     }
-    const mo = M4.copy(body);
+    const mo = Mt(body);
     if (mouth === 'open') {
       M4.translate(mo, 0, 0.625, 0.545);
       M4.rotX(mo, -0.25);
@@ -633,7 +643,7 @@ function drawPlayer() {
   }
   // ---- 耳 ----
   for (const sd of [-1, 1]) {
-    const e = M4.copy(body);
+    const e = Mt(body);
     M4.translate(e, sd * 0.3, 1.1, -0.04);
     M4.rotZ(e, sd * (-0.42 - earZ));
     M4.rotX(e, -0.1 + earX);
@@ -641,14 +651,14 @@ function drawPlayer() {
   }
   // ---- しっぽ ----
   {
-    const tl = M4.copy(body);
+    const tl = Mt(body);
     M4.translate(tl, 0, 0.34, -0.53);
     M4.rotY(tl, Math.sin(t * (run ? 14 : 5)) * 0.3);
     drawMesh(Models.tail, tl);
   }
   // ---- 足 ----
   for (let i = 0; i < 2; i++) {
-    const f = M4.copy(m);
+    const f = Mt(m);
     const [fx, fy, fz, fa] = feet[i];
     M4.translate(f, fx, fy, fz);
     if (fa) M4.rotX(f, fa);
@@ -657,7 +667,7 @@ function drawPlayer() {
   }
   // ---- 手（体のつぶれに合わせて高さも動かす）----
   for (let i = 0; i < 2; i++) {
-    const hd = M4.copy(m);
+    const hd = Mt(m);
     const [hx, hy, hz] = hands[i];
     M4.translate(hd, hx * sxz, hy * sq, hz);
     drawMesh(Models.hand, hd);
@@ -668,7 +678,7 @@ function drawPlayer() {
     for (const sd of [-1, 1]) {
       const fl1 = Math.sin(t * 13 + sd) * (0.08 + wind * 0.14);
       const fl2 = Math.sin(t * 15 + 1.3 + sd) * (0.12 + wind * 0.22);
-      const s = M4.copy(body);
+      const s = Mt(body);
       M4.translate(s, 0.2 + sd * 0.05, 0.47, -0.6);
       M4.rotY(s, 0.25 + sd * 0.22);
       M4.rotZ(s, sd * 0.12);
@@ -696,8 +706,11 @@ function drawShadow(x, y, z, r, a = 0.32) {
 // 種類：ふつうの粒（土ぼこり）／光る粒（emit）／星（star）／輪（ring）／閃光（flash）
 const Fx = {
   list: [],
-  add(o) { if (this.list.length < 400) this.list.push(o); },
+  // 上限は画質しだい（Perf.fxMax）。画質が低いときは、出す数も減らす（scaleN）
+  add(o) { if (this.list.length < Perf.fxMax) this.list.push(o); },
+  scaleN(n) { return Perf.q.fx >= 1 ? n : Math.max(1, Math.round(n * Perf.q.fx)); },
   dust(x, y, z, n) {
+    n = this.scaleN(n);
     for (let i = 0; i < n; i++) {
       const a = Math.random() * TAU, s = 1 + Math.random() * 2;
       this.add({ x: x + Math.cos(a) * 0.3, y: y + 0.12, z: z + Math.sin(a) * 0.3, vx: Math.cos(a) * s, vy: 0.8 + Math.random() * 1.4, vz: Math.sin(a) * s, life: 0.55, max: 0.55, size: 0.2 + Math.random() * 0.14, col: [0.96, 0.92, 0.84], grav: -1.5, alpha: 0.55, drag: 3 });
@@ -705,27 +718,35 @@ const Fx = {
   },
   skid(x, y, z) { if (Math.random() < 0.5) this.dust(x, y, z, 1); },
   burst(x, y, z, col, n, sp) {
+    const n0 = n;
+    n = this.scaleN(n);
     for (let i = 0; i < n; i++) {
       const a = Math.random() * TAU, b = Math.random() * Math.PI - Math.PI / 2, s = sp * (0.5 + Math.random() * 0.7);
       this.add({ x, y, z, vx: Math.cos(a) * Math.cos(b) * s, vy: Math.sin(b) * s + 2, vz: Math.sin(a) * Math.cos(b) * s, life: 0.6, max: 0.6, size: 0.12 + Math.random() * 0.1, col, grav: 10, alpha: 1, emit: 1, star: i % 3 === 0, drag: 1.5, rot: Math.random() * TAU });
     }
     // はじける瞬間の光
     this.add({ flash: true, x, y, z, life: 0.22, max: 0.22, size: 0.5 + sp * 0.12, col: mixc(col, [1, 1, 1], 0.5) });
-    if (n >= 10) this.add({ ring: true, air: true, x, y, z, life: 0.35, max: 0.35, size: 0.3, col: mixc(col, [1, 1, 1], 0.4) });
+    if (n0 >= 10) this.add({ ring: true, air: true, x, y, z, life: 0.35, max: 0.35, size: 0.3, col: mixc(col, [1, 1, 1], 0.4) });
   },
   sparkle(x, y, z, col) {
     this.add({ x: x + (Math.random() - 0.5), y: y + (Math.random() - 0.5), z: z + (Math.random() - 0.5), vx: 0, vy: 0.8, vz: 0, life: 0.7, max: 0.7, size: 0.1, col, grav: 0, alpha: 1, emit: 1, star: true, rot: Math.random() * TAU });
   },
   ring(x, y, z) { this.add({ ring: true, x, y, z, life: 0.45, max: 0.45, size: 0.5, col: [1, 0.97, 0.9] }); },
   update(dt) {
-    for (const p of this.list) {
+    // 消えた粒は、配列を作り直さずに詰めて取りのぞく
+    const L = this.list;
+    let j = 0;
+    for (let i = 0; i < L.length; i++) {
+      const p = L[i];
       p.life -= dt;
+      if (p.life <= 0) continue;
+      L[j++] = p;
       if (p.ring || p.flash) continue;
       p.vy -= p.grav * dt;
       if (p.drag) { const k = Math.exp(-p.drag * dt); p.vx *= k; p.vz *= k; }
       p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
     }
-    this.list = this.list.filter((p) => p.life > 0);
+    L.length = j;
   },
   draw() {
     for (const p of this.list) {

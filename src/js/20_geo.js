@@ -179,6 +179,10 @@ class Geo {
   }
 
   mesh() { return makeMesh(this); }
+
+  // 区画ごとに分けたメッシュ（大きな地形用）。cell メートル四方の格子で三角形を振り分け、
+  // 区画ごとに視錐台カリングできるようにする。drawMesh(返り値, 行列) でそのまま描ける
+  chunkMesh(cell = 24) { return makeChunkedMesh(this, cell); }
 }
 
 // 行列を手早く作るための小道具
@@ -189,6 +193,32 @@ function T(x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1, ry = 0, rx = 0, rz = 0) 
   if (rx) M4.rotX(m, rx);
   if (rz) M4.rotZ(m, rz);
   M4.scale(m, sx, sy, sz);
+  return m;
+}
+
+// T() と同じ行列を、使い回しの置き場に作る（描画のときだけ使う。new しないので速い）
+// 戻り値は Tt() / Mt() をあと TT_POOL 回呼ぶまで有効。drawMesh にすぐ渡す用で、保存してはいけない
+// （drawMesh は受け取った時点で中身を写すので、渡したあとに書きかえても大丈夫）
+const TT_POOL = 1024;
+const ttPool = Array.from({ length: TT_POOL }, () => new Float32Array(16));
+let ttIdx = 0;
+function Tt(x = 0, y = 0, z = 0, sx = 1, sy = 1, sz = 1, ry = 0, rx = 0, rz = 0) {
+  const m = ttPool[ttIdx];
+  ttIdx = (ttIdx + 1) % TT_POOL;
+  m.fill(0);
+  m[0] = m[5] = m[10] = m[15] = 1;
+  m[12] = x; m[13] = y; m[14] = z;
+  if (ry) M4.rotY(m, ry);
+  if (rx) M4.rotX(m, rx);
+  if (rz) M4.rotZ(m, rz);
+  if (sx !== 1 || sy !== 1 || sz !== 1) M4.scale(m, sx, sy, sz);
+  return m;
+}
+// 行列 a の写しを使い回しの置き場に作る（M4.copy の描画用。決まりは Tt と同じ）
+function Mt(a) {
+  const m = ttPool[ttIdx];
+  ttIdx = (ttIdx + 1) % TT_POOL;
+  m.set(a);
   return m;
 }
 

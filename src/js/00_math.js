@@ -49,22 +49,23 @@ const M4 = {
     }
     return out;
   },
-  persp(fovy, asp, n, f) {
-    const t = 1 / Math.tan(fovy / 2), m = new Float32Array(16);
+  // persp / ortho / lookAt は out を渡すと新しい配列を作らずに書きこむ（毎フレームの生成を減らす）
+  persp(fovy, asp, n, f, out) {
+    const t = 1 / Math.tan(fovy / 2), m = out ? out.fill(0) : new Float32Array(16);
     m[0] = t / asp; m[5] = t; m[10] = (f + n) / (n - f); m[11] = -1; m[14] = (2 * f * n) / (n - f);
     return m;
   },
-  ortho(l, r, b, t, n, f) {
-    const m = new Float32Array(16);
+  ortho(l, r, b, t, n, f, out) {
+    const m = out ? out.fill(0) : new Float32Array(16);
     m[0] = 2 / (r - l); m[5] = 2 / (t - b); m[10] = -2 / (f - n);
     m[12] = -(r + l) / (r - l); m[13] = -(t + b) / (t - b); m[14] = -(f + n) / (f - n); m[15] = 1;
     return m;
   },
-  lookAt(e, c, u) {
+  lookAt(e, c, u, out) {
     const z = v3.norm(v3.sub(e, c));
     const x = v3.norm(v3.cross(u, z));
     const y = v3.cross(z, x);
-    const m = new Float32Array(16);
+    const m = out ? out.fill(0) : new Float32Array(16);
     m[0] = x[0]; m[4] = x[1]; m[8] = x[2];
     m[1] = y[0]; m[5] = y[1]; m[9] = y[2];
     m[2] = z[0]; m[6] = z[1]; m[10] = z[2];
@@ -117,11 +118,37 @@ const M4 = {
     out[6] = (b * f - c * e) * k; out[7] = -(a * f - c * d) * k; out[8] = (a * e - b * d) * k;
     return out;
   },
+  // 行列の拡大率のうち一番大きいもの（包む球の半径を出すのに使う）
+  maxScale(m) {
+    const a = m[0] * m[0] + m[1] * m[1] + m[2] * m[2];
+    const b = m[4] * m[4] + m[5] * m[5] + m[6] * m[6];
+    const c = m[8] * m[8] + m[9] * m[9] + m[10] * m[10];
+    return Math.sqrt(a > b ? (a > c ? a : c) : b > c ? b : c);
+  },
   xform(m, p) {
     return [
       m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12],
       m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
       m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14],
     ];
+  },
+};
+
+// 視錐台（カメラや影の範囲に映る空間）。vp 行列から6枚の面を取り出し、球が入るかを調べる
+const Frustum = {
+  // out: Float32Array(24)（面ごとに nx, ny, nz, d）
+  fromVP(m, out) {
+    for (let i = 0; i < 6; i++) {
+      const r = i >> 1, s = i & 1 ? -1 : 1;
+      let x = m[3] + s * m[r], y = m[7] + s * m[4 + r], z = m[11] + s * m[8 + r], w = m[15] + s * m[12 + r];
+      const l = Math.hypot(x, y, z) || 1;
+      out[i * 4] = x / l; out[i * 4 + 1] = y / l; out[i * 4 + 2] = z / l; out[i * 4 + 3] = w / l;
+    }
+    return out;
+  },
+  // 中心 (x,y,z)・半径 r の球が少しでも中にあれば true
+  sphere(pl, x, y, z, r) {
+    for (let i = 0; i < 24; i += 4) if (pl[i] * x + pl[i + 1] * y + pl[i + 2] * z + pl[i + 3] < -r) return false;
+    return true;
   },
 };

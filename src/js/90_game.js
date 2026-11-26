@@ -108,6 +108,7 @@ const MENUS = {
     { id: 'restart', label: () => 'はじめから' },
     { id: 'sfx', label: () => 'こうかおん：' + onOff(Sound.sfxOn) },
     { id: 'bgm', label: () => 'BGM：' + onOff(Sound.bgmOn) },
+    { id: 'quality', label: () => 'がしつ：' + Perf.label() },
     { id: 'help', label: () => 'そうさ説明' },
     { id: 'title', label: () => 'タイトルへ' },
   ],
@@ -203,6 +204,7 @@ function update(dt) {
     else if (id === 'restart') Game.newGame();
     else if (id === 'sfx') Sound.setSfx(!Sound.sfxOn);
     else if (id === 'bgm') Sound.setBgm(!Sound.bgmOn);
+    else if (id === 'quality') Perf.cycle();
     else if (id === 'help') Game.help = true;
     else if (id === 'title') goTitle();
     return;
