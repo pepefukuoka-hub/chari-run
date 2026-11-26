@@ -48,7 +48,7 @@ const Save = {
 Save.load();
 
 const Game = {
-  state: 'title',   // title | select | erase | play | pause | seed | dead | clear
+  state: 'title',   // title | select | erase | play | pause | seed | dead | clear | ending
   time: 0,          // 経過時間（演出用）
   playTime: 0,      // プレイ時間
   stT: 0,
@@ -126,6 +126,8 @@ const Game = {
       this.state = 'seed'; this.stT = 0;
       P.state = 'win';
     }
+    // 最後の種（ボスの種）ならエンディングへ（74_boss.js）
+    if (Level.stage.ending && s.id === Level.stage.ending.seed) startEnding();
   },
   revealSeed(id) { revealSeedMsg(id, 'ひかりの種が あらわれた！'); },
   onFall() {
@@ -355,7 +357,7 @@ function update(dt) {
       else if (id === 'select') goSelect(Game.stageId);
       else if (id === 'title') goTitle();
     }
-  }
+  } else if (Game.state === 'ending') updateEnding(dt);
   if (Game.state === 'dead' && Game.stT > 1.6) {
     const id = menuInput(MENUS.dead);
     if (id === 'retry') respawnAtStart(); // その場の進み具合は残して、スタート地点から再開
@@ -610,6 +612,7 @@ function drawHud() {
 
   if (Game.state === 'title' || Game.state === 'erase') { drawTitle(W, H, fs, small); if (Game.help) drawHelp(W, H); return; }
   if (Game.state === 'select') { drawSelect(W, H, fs, small); return; }
+  if (Game.state === 'ending') { drawEnding(W, H, fs, small); return; }
 
   // ---- 体力 ----
   const L = S.l + 12, T0 = S.t + 10;
@@ -667,6 +670,8 @@ function drawHud() {
     txtFit(t.msg, W / 2, yy + 1, fs + 1, W - 40, '#2c3e70', 'center', null);
     hud.globalAlpha = 1;
   }
+  // ステージ専用の表示（ボスの体力など）
+  if (Level.hud && (Game.state === 'play' || Game.state === 'dead')) Level.hud(W, H, fs, small);
 
   // ---- ダメージの赤いふち ----
   if (Game.hurtFlash > 0) {
