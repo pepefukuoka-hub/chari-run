@@ -2081,8 +2081,9 @@ const Music = (() => {
     }
   });
   const STEPS = mel.length; // 128
-  const BPM = 128;
-  const STEP = 60 / BPM / 2;
+  // 調とテンポはステージごとに変えられる（Music.setStyle）
+  let STEP = 60 / 128 / 2;
+  let pitch = 1;             // 周波数にかける倍率（調の切りかえ）
 
   const M = {
     playing: false, step: 0, next: 0, mode: 'play',
@@ -2091,6 +2092,14 @@ const Music = (() => {
       this.playing = true; this.step = 0; this.next = Sound.ctx.currentTime + 0.15;
     },
     stop() { this.playing = false; },
+    // key: 半音いくつ上げ下げするか、bpm: テンポ。次の音から切りかわる
+    setStyle(o) {
+      const key = (o && o.key) || 0, bpm = (o && o.bpm) || 128;
+      pitch = Math.pow(2, key / 12);
+      STEP = 60 / bpm / 2;
+      this.key = key; this.bpm = bpm;
+    },
+    key: 0, bpm: 128,
     update() {
       const ctx = Sound.ctx;
       if (!ctx || !this.playing || ctx.state !== 'running') return;
@@ -2110,19 +2119,19 @@ const Music = (() => {
       // メロディ：やわらかい矩形波＋1オクターブ下の三角波
       const n = mel[i];
       if (n.f) {
-        const d = n.len * STEP * 0.92;
-        Sound.voice(n.f, n.f, d + 0.05, 'square', 0.07, 0, { lp: 2200, attack: 0.01 }, bus, t);
-        Sound.voice(n.f * 0.5, n.f * 0.5, d + 0.05, 'triangle', 0.09, 0, { attack: 0.01 }, bus, t);
+        const d = n.len * STEP * 0.92, f = n.f * pitch;
+        Sound.voice(f, f, d + 0.05, 'square', 0.07, 0, { lp: 2200, attack: 0.01 }, bus, t);
+        Sound.voice(f * 0.5, f * 0.5, d + 0.05, 'triangle', 0.09, 0, { attack: 0.01 }, bus, t);
       }
       // ベース：ルート→5度（ぽんぽん跳ねる）
       if (s8 % 2 === 0) {
-        const root = ch[0];
+        const root = ch[0] * pitch;
         const f = s8 === 2 || s8 === 6 ? root * 1.5 : root;
         Sound.voice(f, f, STEP * 1.6, 'triangle', 0.32, 0, { attack: 0.005 }, bus, t);
       }
       // 和音のきざみ（裏拍）
       if (s8 % 2 === 1) {
-        for (let k = 1; k < 4; k++) Sound.voice(ch[k], ch[k], STEP * 0.7, 'square', 0.022, 0, { lp: 1600, attack: 0.004 }, bus, t);
+        for (let k = 1; k < 4; k++) Sound.voice(ch[k] * pitch, ch[k] * pitch, STEP * 0.7, 'square', 0.022, 0, { lp: 1600, attack: 0.004 }, bus, t);
       }
       // 打楽器：バスドラ（1・3拍目）、シェイカー（毎回）、スネア（2・4拍目）
       if (s8 === 0 || s8 === 4) Sound.voice(150, 45, 0.16, 'sine', 0.45, 0, null, bus, t);
@@ -3997,18 +4006,44 @@ const Level = {
 // 2回目以降の組み立て用：形状を作らない Geo の代わり
 const NOGEO = { box() { return this; }, cyl() { return this; }, sphere() { return this; }, disc() { return this; }, torus() { return this; } };
 
-function buildLevel() {
+// ステージの一覧（id の順）。各ステージは defineStage で登録する
+//   id, name, killY（落下とみなす高さ）, start（スタート位置）, env（空・霧・光）, music（BGM の調とテンポ）,
+//   tint（地形・敵にかける色）, titleCam（タイトル・ステージ選びの背景のカメラ）, unlock（開く条件）, build(K)
+const STAGES = [];
+function defineStage(def) { STAGES[def.id] = def; return def; }
+
+// ステージの空・霧・光を R に入れる（R の中身を書きかえる。10_gl.js が毎フレーム読む）
+function applyStageEnv(st) {
+  const e = st.env;
+  if (!e || typeof R === 'undefined' || !R.sky) return;
+  R.sky.top = e.top.slice(); R.sky.bottom = e.bottom.slice(); R.sky.sun = e.sun.slice();
+  R.fogCol = e.fogCol.slice(); R.fog = e.fog.slice();
+  R.light = v3.norm(e.light.slice());
+}
+
+function buildLevel(id) {
+  if (id === undefined || id === null) id = Level.stageId || 0;
+  const st = STAGES[id] || STAGES[0];
+  Level.stageId = st.id; Level.stage = st;
   World.clear();
-  World.killY = -28;
+  World.killY = st.killY;
   Object.assign(Level, {
     acorns: [], seeds: [], hearts: [], enemies: [], movers: [], springs: [], signs: [], clouds: [],
     spinners: [], fallers: [], stakes: [], risers: [], launchers: [], mills: [], flags: [],
     stakeDone: false, arenaDone: false,
+    updaters: [], drawers: [], poundHooks: [], acornSeed: null, arenaSeed: null,
+    tint: st.tint || WHITE,
+    start: Object.assign({}, st.start),
   });
-  const cache = Level._cache || (Level._cache = {});
+  applyStageEnv(st);
+  // 地形メッシュはステージごと、共通の部品（ばね・杭など）は全ステージで使い回す
+  const caches = Level._caches || (Level._caches = {});
+  const cache = caches[st.id] || (caches[st.id] = {});
+  const shared = Level._shared || (Level._shared = {});
   const g = cache.static ? NOGEO : new Geo(0.09);
-  const rng = makeRng(20261125);
-  const once = (key, make) => cache[key] || (cache[key] = make());
+  const rng = makeRng(st.seed || 20261125);
+  const once = (key, make) => shared[key] || (shared[key] = make());
+  const onceStage = (key, make) => cache[key] || (cache[key] = make());
 
   // ---------- 部品 ----------
   const grassCol = (p, n) => (n[1] > 0.5 ? mixc(COL.grassDk, COL.grass, 0.5 + 0.5 * Math.sin(p[0] * 3.1 + p[2] * 2.3)) : p[1] > 0.75 ? COL.grassDk : COL.dirt);
@@ -4025,6 +4060,7 @@ function buildLevel() {
     if (kind === 'wood') return (p, n) => (n[1] > 0.5 ? COL.wood : COL.woodDk);
     if (kind === 'ice') return (p, n) => (n[1] > 0.5 ? COL.ice : shade(COL.ice, 0.85));
     if (kind === 'cloud') return (p, n) => (n[1] > 0.5 ? COL.cloud : hex(0xd6e4f4));
+    if (kind === 'snow') return (p, n) => (n[1] > 0.5 ? hex(0xf4f8ff) : p[1] > 0.3 ? hex(0xdfe8f6) : hex(0x8a8fa8));
     return (p, n) => (n[1] > 0.5 ? COL.grass : p[1] > 0.3 ? COL.grassDk : COL.dirt);
   }
   function block(cx, cy, cz, sx, sy, sz, kind = 'grass') {
@@ -4202,6 +4238,329 @@ function buildLevel() {
   const blobAt = (x, y, z, range = 5, arena = false) => Level.enemies.push({ type: 'blob', x, y, z, hx: x, hz: z, range, yaw: rng() * TAU, vy: 0, alive: true, t: rng() * 5, state: 'walk', st: 0, squish: 1, arena });
   const spikyAt = (ax, ay, az, bx, by, bz, speed = 5) => Level.enemies.push({ type: 'spiky', ax, ay, az, bx, by, bz, speed, u: 0, dir: 1, x: ax, y: ay, z: az, alive: true, rot: 0 });
   const hopperAt = (x, y, z, range = 4, arena = false) => Level.enemies.push({ type: 'hopper', x, y, z, hx: x, hz: z, range, yaw: rng() * TAU, vx: 0, vz: 0, vy: 0, air: false, alive: true, t: rng() * 5, st: 0.5 + rng(), squish: 1, arena });
+
+  const K = { st, g, rng, once, onceStage, grassCol, dirtCol, rockCol, island, kindColor, block, oblock, stump, tree, pine, rock, flower, tuft, scatter, fence, sign, hut, flag, windmill, mover, spinner, faller, stake, riser, launcher, acornAt, acornLine, acornRing, seedAt, heartAt, blobAt, spikyAt, hopperAt };
+  st.build(K);
+
+  // どんぐりの総数
+  Level.acornTotal = Level.acorns.length;
+  Level.seedTotal = Level.seeds.length;
+  st.seedTotal = Level.seedTotal;
+
+  // まとめた地形メッシュ（2回目以降は作り直さない）
+  if (!cache.static) { cache.static = g.mesh(); cache.staticTris = g.pos.length / 9; }
+  Level.static = cache.static;
+  Level.staticTris = cache.staticTris;
+
+  // ---- 動く物のメッシュ ----
+  const boxMesh = (sx, sy, sz, kind, jit = 0.06) => once(`box:${sx}:${sy}:${sz}:${kind}`, () => new Geo(jit).box(T(0, 0, 0, sx, sy, sz), kindColor(kind)).mesh());
+  for (const mv of Level.movers) {
+    const s = mv.s;
+    mv.mesh = boxMesh(s.x1 - s.x0, s.y1 - s.y0, s.z1 - s.z0, s.kind);
+  }
+  for (const sp of Level.spinners) {
+    sp.mesh = once(`spin:${sp.sx}:${sp.sz}:${sp.s.kind}`, () => {
+      const gg = new Geo(0.06);
+      gg.box(T(0, 0, 0, sp.sx, 0.5, sp.sz), kindColor(sp.s.kind));
+      for (let i = 0; i < 9; i++) gg.box(T(-sp.sx / 2 + 0.6 + i * ((sp.sx - 1.2) / 8), 0.26, 0, 0.12, 0.03, sp.sz), COL.woodDk);
+      gg.cyl(T(0, 0.25, 0, 0.5, 0.08, 0.5), hex(0xffd166), 12);
+      return gg.mesh();
+    });
+  }
+  for (const f of Level.fallers) {
+    f.mesh = once(`fall:${f.sx}:${f.sz}`, () => {
+      const gg = new Geo(0.12);
+      gg.box(T(0, 0, 0, f.sx, 0.6, f.sz), (p, n) => (n[1] > 0.5 ? hex(0xd9a066) : hex(0xa36a3a)));
+      gg.box(T(0.3, 0.31, -0.2, 1.4, 0.02, 0.08, 0.6), hex(0x6b4325)); // ひび
+      gg.box(T(-0.4, 0.31, 0.4, 0.9, 0.02, 0.08, -0.9), hex(0x6b4325));
+      return gg.mesh();
+    });
+  }
+  for (const r of Level.risers) {
+    r.mesh = once(`rise:${r.sx}:${r.sz}`, () => {
+      const gg = new Geo(0.03);
+      gg.box(T(0, 0, 0, r.sx, 0.7, r.sz), kindColor('cloud'));
+      for (const [ox, oz] of [[-0.8, -0.8], [0.8, -0.7], [-0.7, 0.8], [0.8, 0.8]]) gg.sphere(T(ox, -0.2, oz, 0.75, 0.5, 0.75), COL.cloud, 8, 5, { flat: true });
+      return gg.mesh();
+    });
+  }
+  Models.stake = once('stake', () => {
+    const gg = new Geo(0.08);
+    gg.cyl(T(0, 0, 0, 0.55, 2.7, 0.55), (p, n) => (n[1] > 0.5 ? hex(0xe9c08a) : COL.woodDk), 10, { flat: true });
+    gg.cyl(T(0, 2.7, 0, 0.62, 0.2, 0.62), hex(0xd8604a), 10, { flat: true });
+    return gg.mesh();
+  });
+  Models.spring = once('spring', () => {
+    const gg = new Geo();
+    gg.cyl(T(0, 0, 0, 0.8, 0.15, 0.8), COL.stoneDk, 14);
+    for (let i = 0; i < 3; i++) gg.torus(T(0, 0.18 + i * 0.12, 0, 0.55, 1, 0.55), COL.spikeTip, 1, 0.08, 14, 5);
+    gg.cyl(T(0, 0.5, 0, 0.8, 0.12, 0.8), hex(0xff5a5a), 14);
+    return gg.mesh();
+  });
+  Models.launcher = once('launcher', () => {
+    const gg = new Geo();
+    gg.cyl(T(0, -0.15, 0, 0.95, 0.15, 0.95), hex(0x7fd3ff), 16);
+    // 進む向き（+z）の矢印
+    gg.box(T(0, 0.02, -0.15, 0.3, 0.05, 0.9), COL.white);
+    gg.box(T(0.22, 0.02, 0.35, 0.18, 0.05, 0.6, 0.7), COL.white);
+    gg.box(T(-0.22, 0.02, 0.35, 0.18, 0.05, 0.6, -0.7), COL.white);
+    return gg.mesh();
+  });
+  Models.millBlades = once('mill', () => {
+    const gg = new Geo();
+    gg.cyl(T(0, 0, 0, 0.35, 0.4, 0.35, 0, Math.PI / 2), COL.woodDk, 10);
+    for (let i = 0; i < 4; i++) {
+      const m = T(0, 0, 0.25, 1, 1, 1, 0, 0, (i * Math.PI) / 2);
+      const arm = M4.copy(m); M4.translate(arm, 0, 2.0, 0); M4.scale(arm, 0.12, 4, 0.08);
+      gg.box(arm, COL.woodDk);
+      const sail = M4.copy(m); M4.translate(sail, 0.38, 2.4, 0.02); M4.scale(sail, 0.7, 3, 0.04);
+      gg.box(sail, hex(0xfaf3e6));
+    }
+    return gg.mesh();
+  });
+  Models.flagCloth2 = once('flagcloth', () => new Geo().box(T(0, 0, 0, 1, 1, 1), WHITE).mesh());
+  if (!Models.hopper) buildLevelModels();
+
+  // ---- 雲（下の雲海と、遠くの雲）----
+  const cc = st.cloud || { lo: hex(0xdde8f5), far: hex(0xe8f0fa), top: COL.cloud };
+  Level.cloudMesh = onceStage('clouds', () => {
+    const cg = new Geo(0.04);
+    const crng = makeRng(7);
+    for (let i = 0; i < 70; i++) {
+      const a = crng() * TAU, r = 30 + crng() * 140;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const y = -22 - crng() * 6;
+      const s = 6 + crng() * 10;
+      cg.sphere(T(x, y, z, s, s * 0.35, s * 0.8, crng() * 3), (p) => mixc(cc.lo, cc.top, p[1] * 0.5 + 0.5), 10, 6, { flat: true });
+    }
+    for (let i = 0; i < 18; i++) {
+      const a = crng() * TAU, r = 110 + crng() * 50;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r, y = 10 + crng() * 35;
+      for (let k = 0; k < 3; k++) {
+        const s = 4 + crng() * 5;
+        cg.sphere(T(x + (k - 1) * s * 0.9, y + crng() * 2, z, s, s * 0.6, s * 0.7), (p) => mixc(cc.far, cc.top, p[1] * 0.5 + 0.5), 10, 6, { flat: true });
+      }
+    }
+    return cg.mesh();
+  });
+  // 空（大きな球の内側）
+  Models.sky = once('sky', () => {
+    const sg = new Geo();
+    sg.sphere(T(0, 0, 0, -1, 1, 1), (p) => {
+      const y = p[1];
+      if (y > 0) return mixc(hex(0xbfe4ff), hex(0x4f9ae8), Math.pow(y, 0.7));
+      return mixc(hex(0xbfe4ff), hex(0xe9f3ff), Math.min(1, -y * 3));
+    }, 24, 14);
+    return sg.mesh();
+  });
+}
+
+// ステージ専用のモデル（新しい敵など）
+function buildLevelModels() {
+  // ---- 敵：ぴょんまる（はねて近づいてくる。踏める）----
+  const g = new Geo();
+  const body = hex(0x6fcf7f), bodyDk = hex(0x3f9a5a);
+  g.sphere(T(0, 0.5, 0, 0.5, 0.46, 0.5), (p) => (p[2] > 0.55 && p[1] < 0.1 ? hex(0xeafbe0) : mixc(bodyDk, body, clamp(p[1] + 0.7, 0, 1))), 14, 10, { flat: true });
+  for (const sx of [-1, 1]) {
+    g.sphere(T(sx * 0.2, 0.7, 0.4, 0.15, 0.17, 0.1), COL.white, 10, 6);
+    g.sphere(T(sx * 0.2, 0.68, 0.48, 0.07, 0.09, 0.05), COL.eye, 8, 5);
+    g.sphere(T(sx * 0.27, 0.08, 0.12, 0.17, 0.08, 0.24), hex(0xffb347), 8, 5); // 足
+  }
+  g.box(T(0, 0.45, 0.5, 0.18, 0.06, 0.04), COL.eye); // 口
+  // 頭の葉っぱ
+  g.cyl(T(0, 0.92, 0, 0.04, 0.25, 0.04), bodyDk, 5);
+  g.sphere(T(0.15, 1.15, 0, 0.2, 0.05, 0.1, 0, 0, 0.4), COL.leaf, 8, 4);
+  g.sphere(T(-0.15, 1.15, 0, 0.2, 0.05, 0.1, 0, 0, -0.4), COL.leaf, 8, 4);
+  Models.hopper = g.mesh();
+}
+
+// 種を出す（メッセージつき）
+function revealSeedMsg(id, msg) {
+  const s = Level.seeds.find((q) => q.id === id);
+  if (!s || !s.hidden) return;
+  s.hidden = false;
+  Sound.play('seed');
+  Fx.burst(s.x, s.y + 0.7, s.z, [0.7, 1, 0.95], 24, 6);
+  Game.toast(msg, 4);
+}
+
+// 動く足場・ばねなどの更新
+function updateLevel(dt) {
+  for (const s of World.solids) { s.dx = s.dy = s.dz = 0; if (s.rotY) s.rotY = 0; }
+  for (const mv of Level.movers) {
+    mv.t += dt * mv.speed;
+    const k = 0.5 - 0.5 * Math.cos(mv.t * Math.PI); // 0〜1 往復
+    const s = mv.s;
+    const cx = (s.x0 + s.x1) / 2, cy = (s.y0 + s.y1) / 2, cz = (s.z0 + s.z1) / 2;
+    if (mv.axis === 'x') World.move(s, lerp(mv.ax, mv.bx, k) - cx, 0, 0);
+    if (mv.axis === 'z') World.move(s, 0, 0, lerp(mv.az, mv.bz, k) - cz);
+    if (mv.axis === 'y') World.move(s, 0, lerp(mv.ay, mv.by, k) - cy, 0);
+  }
+  // 回る橋
+  for (const sp of Level.spinners) World.rotate(sp.s, sp.speed * dt);
+  // 落ちる足場：乗る → ぐらぐら（1秒）→ 落ちる → 消える → 元の場所に戻る
+  const onS = P.grounded ? P.groundS : null;
+  for (const f of Level.fallers) {
+    const s = f.s;
+    f.t += dt;
+    if (f.state === 'idle') {
+      if (onS === s) { f.state = 'shake'; f.t = 0; Sound.play('land'); }
+    } else if (f.state === 'shake') {
+      if (f.t > 1.0) { f.state = 'fall'; f.t = 0; f.vy = 0; }
+    } else if (f.state === 'fall') {
+      f.vy = Math.min(f.vy + 30 * dt, 30);
+      World.move(s, 0, -f.vy * dt, 0);
+      if (f.t > 2.2) { f.state = 'gone'; f.t = 0; s.off = true; }
+    } else if (f.state === 'gone' && f.t > 2.5) {
+      // 主人公が元の場所にいなければ戻す
+      const cx = (s.x0 + s.x1) / 2, cz = (s.z0 + s.z1) / 2;
+      const inside = Math.abs(P.x - cx) < f.sx / 2 + 0.6 && Math.abs(P.z - cz) < f.sz / 2 + 0.6 && Math.abs(P.y - f.base) < 2;
+      if (!inside) {
+        World.move(s, 0, f.base - s.y0, 0);
+        s.dy = 0;
+        s.off = false; f.state = 'idle'; f.t = 0;
+        Fx.burst(cx, s.y1, cz, [1, 0.95, 0.8], 6, 2);
+      }
+    }
+  }
+  // 杭：打ちこまれたら沈む
+  for (const st of Level.stakes) {
+    const s = st.s;
+    if (st.down && s.y1 > st.ground + 0.06) World.move(s, 0, -Math.min(dt * 7, s.y1 - (st.ground + 0.06)), 0);
+  }
+  // 雲の飛び石：下から浮かんでくる
+  for (const r of Level.risers) {
+    if (!r.active) continue;
+    r.t += dt;
+    const s = r.s;
+    const k = clamp(r.t / 1.6, 0, 1);
+    const want = r.top - 30 * Math.pow(1 - k, 3);
+    if (r.t <= 0) continue;
+    s.off = false;
+    World.move(s, 0, want - s.y1, 0);
+  }
+  // 風の筒：乗ったら飛ばす
+  for (const L of Level.launchers) {
+    L.t += dt;
+    if (P.grounded && P.groundS === L.s && (P.state === 'ground' || P.state === 'punch')) {
+      const k = L.s.launch;
+      P.grounded = false; P.groundS = null;
+      P.state = 'air'; P.airT = 0; P.stateT = 0;
+      P.yaw = k.yaw; P.speed = k.sp;
+      P.vx = Math.sin(k.yaw) * k.sp; P.vz = Math.cos(k.yaw) * k.sp; P.vy = k.vy;
+      P.longJump = true; P.jumpHeld = true; P.flip = 0.001; P.flipDir = 1; P.jumpN = 0;
+      Sound.play('spring');
+      Fx.burst(L.x, L.y + 0.3, L.z, [0.7, 0.9, 1], 16, 6);
+    }
+  }
+  for (const m of Level.mills) m.a += dt * 0.9;
+  // ステージ専用の仕掛け（つらら・風など）
+  for (const f of Level.updaters) f(dt);
+  for (const f of Level.flags) f.t += dt;
+  for (const s of Level.springs) s.boing = Math.max(0, (s.boing || 0) - dt * 3);
+}
+
+// ヒップドロップで杭を打つ（75_entities.js の poundShock から呼ぶ）
+function poundStakes(x, y, z) {
+  for (const st of Level.stakes) {
+    if (st.down) continue;
+    const s = st.s;
+    if (Math.hypot(x - s.x, z - s.z) < s.r + 0.45 && Math.abs(y - s.y1) < 0.35) {
+      st.down = true;
+      Sound.play('stomp');
+      Fx.burst(s.x, s.y1, s.z, [0.9, 0.75, 0.5], 12, 5);
+      const left = Level.stakes.filter((q) => !q.down).length;
+      if (left > 0) Game.toast(`杭を打った！ あと ${left} 本`, 2);
+      else if (!Level.stakeDone) {
+        Level.stakeDone = true;
+        Level.risers.forEach((r, i) => { r.active = true; r.t = -i * 0.45; });
+        Sound.play('seed');
+        Game.toast('南東の雲の下から 飛び石が うかんできた！', 4);
+      }
+    }
+  }
+}
+
+const FALL_TINT = [1, 0.85, 0.75], STAKE_TINT = [0.85, 0.85, 0.85];
+function drawLevel() {
+  // 空
+  gl.depthMask(false);
+  gl.disable(gl.CULL_FACE);
+  drawMesh(Models.sky, T(R.cam[0], R.cam[1], R.cam[2], 300, 300, 300), WHITE, 1, 1);
+  gl.enable(gl.CULL_FACE);
+  gl.depthMask(true);
+  drawMesh(Level.cloudMesh, T(), WHITE, 0.55, 1);
+  const tint = Level.tint;
+  drawMesh(Level.static, M4.ident(), tint);
+  const t = Game.time;
+  for (const mv of Level.movers) {
+    const s = mv.s;
+    drawMesh(mv.mesh, T((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2, (s.z0 + s.z1) / 2), tint);
+  }
+  for (const sp of Level.spinners) {
+    const s = sp.s;
+    drawMesh(sp.mesh, T(s.cx, (s.y0 + s.y1) / 2, s.cz, 1, 1, 1, s.ang), tint);
+  }
+  for (const f of Level.fallers) {
+    if (f.state === 'gone') continue;
+    const s = f.s;
+    const sh = f.state === 'shake' ? 0.08 : 0;
+    drawMesh(f.mesh, T((s.x0 + s.x1) / 2 + Math.sin(t * 60) * sh, (s.y0 + s.y1) / 2, (s.z0 + s.z1) / 2 + Math.cos(t * 53) * sh), f.state === 'idle' ? tint : FALL_TINT);
+  }
+  for (const r of Level.risers) {
+    if (r.s.off) continue;
+    const s = r.s;
+    drawMesh(r.mesh, T((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2 + Math.sin(t * 1.6 + s.x0) * 0.04, (s.z0 + s.z1) / 2), tint);
+  }
+  for (const st of Level.stakes) {
+    const s = st.s;
+    drawMesh(Models.stake, T(s.x, s.y1 - 2.9, s.z), st.down ? STAKE_TINT : tint);
+  }
+  for (const L of Level.launchers) {
+    const k = 0.5 + 0.5 * Math.sin(L.t * 5);
+    drawMesh(Models.launcher, T(L.x, L.y, L.z, 1, 1, 1, L.yaw), WHITE, 0.2 + k * 0.4);
+  }
+  for (const m of Level.mills) {
+    const mm = T(m.x, m.y, m.z, 1, 1, 1, m.yaw);
+    M4.rotZ(mm, m.a);
+    drawMesh(Models.millBlades, mm, tint);
+  }
+  // 旗の布：細い帯を波打たせる
+  for (const f of Level.flags) {
+    const n = 5, w = 1.3 / n;
+    for (let i = 0; i < n; i++) {
+      const u = (i + 0.5) / n;
+      const wave = Math.sin(f.t * 5 - i * 0.9) * 0.18 * u;
+      drawMesh(Models.flagCloth2, T(f.x + 0.08 + u * 1.3, f.y - 0.35 - u * 0.08, f.z + wave, w * 1.02, 0.72 - u * 0.1, 0.05, Math.sin(f.t * 5 - i * 0.9) * 0.3), f.col);
+    }
+  }
+  for (const s of Level.springs) {
+    const b = s.boing || 0;
+    drawMesh(Models.spring, T((s.x0 + s.x1) / 2, s.y0, (s.z0 + s.z1) / 2, 1, 1 + Math.sin(b * 12) * b * 0.6, 1), tint);
+  }
+  // ステージ専用の物
+  for (const f of Level.drawers) f(t, tint);
+}
+
+
+// ================= ステージ1「そよかぜ空島」 =================
+// 起動したときの R の空・霧・光を、このステージの色として覚えておく
+const ENV_DEFAULT = typeof R !== 'undefined' && R.sky ? { top: R.sky.top.slice(), bottom: R.sky.bottom.slice(), sun: R.sky.sun.slice(), fogCol: R.fogCol.slice(), fog: R.fog.slice(), light: R.light.slice() } : null;
+defineStage({
+  id: 0, name: 'そよかぜ空島', sub: 'はじまりの草原と 風の塔',
+  killY: -28, seed: 20261125, seedTotal: 8,
+  start: { x: 0, y: 0, z: 16, yaw: Math.PI },
+  env: ENV_DEFAULT,
+  music: { key: 0, bpm: 128 },
+  titleCam: { r: 46, y: 22, tx: 0, ty: 4, tz: -4 },
+  color: '#8ee0ff',
+  build: buildStage1,
+});
+function buildStage1(K) {
+  const { g, rng, once, onceStage, grassCol, dirtCol, rockCol, island, kindColor, block, oblock, stump, tree, pine, rock, flower, tuft, scatter, fence, sign, hut, flag, windmill, mover, spinner, faller, stake, riser, launcher, acornAt, acornLine, acornRing, seedAt, heartAt, blobAt, spikyAt, hopperAt } = K;
+  void once; void onceStage;
+  Level.acornSeed = { n: 50, id: 5, msg: 'どんぐり50こ！ スタート地点に ひかりの種が あらわれた！' };
+  Level.arenaSeed = { id: 3, msg: '高台の敵を ぜんぶ たおした！ ひかりの種が あらわれた！' };
 
   // ================= 中央の島（はじまりの草原） =================
   island(0, 0, 28, 0, 10);
@@ -4442,295 +4801,607 @@ function buildLevel() {
     Level.springs.push(World.boxC(x - 1.4, -3.25, z + 1.4, 1.6, 0.5, 1.6, 'spring'));
   }
 
-  // どんぐりの総数
-  Level.acornTotal = Level.acorns.length;
-  Level.seedTotal = Level.seeds.length;
-
-  // まとめた地形メッシュ（2回目以降は作り直さない）
-  if (!cache.static) { cache.static = g.mesh(); cache.staticTris = g.pos.length / 9; }
-  Level.static = cache.static;
-  Level.staticTris = cache.staticTris;
-
-  // ---- 動く物のメッシュ ----
-  const boxMesh = (sx, sy, sz, kind, jit = 0.06) => once(`box:${sx}:${sy}:${sz}:${kind}`, () => new Geo(jit).box(T(0, 0, 0, sx, sy, sz), kindColor(kind)).mesh());
-  for (const mv of Level.movers) {
-    const s = mv.s;
-    mv.mesh = boxMesh(s.x1 - s.x0, s.y1 - s.y0, s.z1 - s.z0, s.kind);
-  }
-  for (const sp of Level.spinners) {
-    sp.mesh = once(`spin:${sp.sx}:${sp.sz}`, () => {
-      const gg = new Geo(0.06);
-      gg.box(T(0, 0, 0, sp.sx, 0.5, sp.sz), kindColor('wood'));
-      for (let i = 0; i < 9; i++) gg.box(T(-sp.sx / 2 + 0.6 + i * ((sp.sx - 1.2) / 8), 0.26, 0, 0.12, 0.03, sp.sz), COL.woodDk);
-      gg.cyl(T(0, 0.25, 0, 0.5, 0.08, 0.5), hex(0xffd166), 12);
-      return gg.mesh();
-    });
-  }
-  for (const f of Level.fallers) {
-    f.mesh = once(`fall:${f.sx}:${f.sz}`, () => {
-      const gg = new Geo(0.12);
-      gg.box(T(0, 0, 0, f.sx, 0.6, f.sz), (p, n) => (n[1] > 0.5 ? hex(0xd9a066) : hex(0xa36a3a)));
-      gg.box(T(0.3, 0.31, -0.2, 1.4, 0.02, 0.08, 0.6), hex(0x6b4325)); // ひび
-      gg.box(T(-0.4, 0.31, 0.4, 0.9, 0.02, 0.08, -0.9), hex(0x6b4325));
-      return gg.mesh();
-    });
-  }
-  for (const r of Level.risers) {
-    r.mesh = once(`rise:${r.sx}:${r.sz}`, () => {
-      const gg = new Geo(0.03);
-      gg.box(T(0, 0, 0, r.sx, 0.7, r.sz), kindColor('cloud'));
-      for (const [ox, oz] of [[-0.8, -0.8], [0.8, -0.7], [-0.7, 0.8], [0.8, 0.8]]) gg.sphere(T(ox, -0.2, oz, 0.75, 0.5, 0.75), COL.cloud, 8, 5, { flat: true });
-      return gg.mesh();
-    });
-  }
-  Models.stake = once('stake', () => {
-    const gg = new Geo(0.08);
-    gg.cyl(T(0, 0, 0, 0.55, 2.7, 0.55), (p, n) => (n[1] > 0.5 ? hex(0xe9c08a) : COL.woodDk), 10, { flat: true });
-    gg.cyl(T(0, 2.7, 0, 0.62, 0.2, 0.62), hex(0xd8604a), 10, { flat: true });
-    return gg.mesh();
-  });
-  Models.spring = once('spring', () => {
-    const gg = new Geo();
-    gg.cyl(T(0, 0, 0, 0.8, 0.15, 0.8), COL.stoneDk, 14);
-    for (let i = 0; i < 3; i++) gg.torus(T(0, 0.18 + i * 0.12, 0, 0.55, 1, 0.55), COL.spikeTip, 1, 0.08, 14, 5);
-    gg.cyl(T(0, 0.5, 0, 0.8, 0.12, 0.8), hex(0xff5a5a), 14);
-    return gg.mesh();
-  });
-  Models.launcher = once('launcher', () => {
-    const gg = new Geo();
-    gg.cyl(T(0, -0.15, 0, 0.95, 0.15, 0.95), hex(0x7fd3ff), 16);
-    // 進む向き（+z）の矢印
-    gg.box(T(0, 0.02, -0.15, 0.3, 0.05, 0.9), COL.white);
-    gg.box(T(0.22, 0.02, 0.35, 0.18, 0.05, 0.6, 0.7), COL.white);
-    gg.box(T(-0.22, 0.02, 0.35, 0.18, 0.05, 0.6, -0.7), COL.white);
-    return gg.mesh();
-  });
-  Models.millBlades = once('mill', () => {
-    const gg = new Geo();
-    gg.cyl(T(0, 0, 0, 0.35, 0.4, 0.35, 0, Math.PI / 2), COL.woodDk, 10);
-    for (let i = 0; i < 4; i++) {
-      const m = T(0, 0, 0.25, 1, 1, 1, 0, 0, (i * Math.PI) / 2);
-      const arm = M4.copy(m); M4.translate(arm, 0, 2.0, 0); M4.scale(arm, 0.12, 4, 0.08);
-      gg.box(arm, COL.woodDk);
-      const sail = M4.copy(m); M4.translate(sail, 0.38, 2.4, 0.02); M4.scale(sail, 0.7, 3, 0.04);
-      gg.box(sail, hex(0xfaf3e6));
-    }
-    return gg.mesh();
-  });
-  Models.flagCloth2 = once('flagcloth', () => new Geo().box(T(0, 0, 0, 1, 1, 1), WHITE).mesh());
-  if (!Models.hopper) buildLevelModels();
-
-  // ---- 雲（下の雲海と、遠くの雲）----
-  Level.cloudMesh = once('clouds', () => {
-    const cg = new Geo(0.04);
-    const crng = makeRng(7);
-    for (let i = 0; i < 70; i++) {
-      const a = crng() * TAU, r = 30 + crng() * 140;
-      const x = Math.cos(a) * r, z = Math.sin(a) * r;
-      const y = -22 - crng() * 6;
-      const s = 6 + crng() * 10;
-      cg.sphere(T(x, y, z, s, s * 0.35, s * 0.8, crng() * 3), (p) => mixc(hex(0xdde8f5), COL.cloud, p[1] * 0.5 + 0.5), 10, 6, { flat: true });
-    }
-    for (let i = 0; i < 18; i++) {
-      const a = crng() * TAU, r = 110 + crng() * 50;
-      const x = Math.cos(a) * r, z = Math.sin(a) * r, y = 10 + crng() * 35;
-      for (let k = 0; k < 3; k++) {
-        const s = 4 + crng() * 5;
-        cg.sphere(T(x + (k - 1) * s * 0.9, y + crng() * 2, z, s, s * 0.6, s * 0.7), (p) => mixc(hex(0xe8f0fa), COL.cloud, p[1] * 0.5 + 0.5), 10, 6, { flat: true });
-      }
-    }
-    return cg.mesh();
-  });
-  // 空（大きな球の内側）
-  Models.sky = once('sky', () => {
-    const sg = new Geo();
-    sg.sphere(T(0, 0, 0, -1, 1, 1), (p) => {
-      const y = p[1];
-      if (y > 0) return mixc(hex(0xbfe4ff), hex(0x4f9ae8), Math.pow(y, 0.7));
-      return mixc(hex(0xbfe4ff), hex(0xe9f3ff), Math.min(1, -y * 3));
-    }, 24, 14);
-    return sg.mesh();
-  });
 }
 
-// ステージ専用のモデル（新しい敵など）
-function buildLevelModels() {
-  // ---- 敵：ぴょんまる（はねて近づいてくる。踏める）----
-  const g = new Geo();
-  const body = hex(0x6fcf7f), bodyDk = hex(0x3f9a5a);
-  g.sphere(T(0, 0.5, 0, 0.5, 0.46, 0.5), (p) => (p[2] > 0.55 && p[1] < 0.1 ? hex(0xeafbe0) : mixc(bodyDk, body, clamp(p[1] + 0.7, 0, 1))), 14, 10, { flat: true });
-  for (const sx of [-1, 1]) {
-    g.sphere(T(sx * 0.2, 0.7, 0.4, 0.15, 0.17, 0.1), COL.white, 10, 6);
-    g.sphere(T(sx * 0.2, 0.68, 0.48, 0.07, 0.09, 0.05), COL.eye, 8, 5);
-    g.sphere(T(sx * 0.27, 0.08, 0.12, 0.17, 0.08, 0.24), hex(0xffb347), 8, 5); // 足
-  }
-  g.box(T(0, 0.45, 0.5, 0.18, 0.06, 0.04), COL.eye); // 口
-  // 頭の葉っぱ
-  g.cyl(T(0, 0.92, 0, 0.04, 0.25, 0.04), bodyDk, 5);
-  g.sphere(T(0.15, 1.15, 0, 0.2, 0.05, 0.1, 0, 0, 0.4), COL.leaf, 8, 4);
-  g.sphere(T(-0.15, 1.15, 0, 0.2, 0.05, 0.1, 0, 0, -0.4), COL.leaf, 8, 4);
-  Models.hopper = g.mesh();
+// ===== 72_stage2.js =====
+// ステージ2「こおりの空島」：ゆうやけの空に浮かぶ、雪と氷の島
+//
+// 地図（上が北＝ -z、右が東＝ +x）
+//   中央：雪原（半径24、高さ0）。スタートは南側 (0,14)
+//   北  ：風のつり橋（横風がふく。風よけのかげで待つ）→ 北の島 ………… 種0
+//   東  ：氷の道 → 凍った池（まんなかの ひびを ヒップドロップ）→ 池の下のほらあな … 種1
+//   西  ：氷の柱のぼり（すべる柱を続けてジャンプ）→ 雪山のてっぺん …… 種2
+//   南西：雪山から長いすべり台（しゃがんですべって 幅とび）→ 雪すべりの島 … 種3
+//   南  ：つららの谷（落ちてくるつらら・穴）→ 奥の高い棚（バク宙）……… 種4
+//   南東：ゆきだるん広場（雪玉を投げる ゆきだるんを ぜんぶ たおす）…… 種5
+//   北東：動く足場 → 上下する足場 → ぐらぐら足場 → 灯台の島 …………… 種6
+defineStage({
+  id: 1, name: 'こおりの空島', sub: 'ゆうやけの 雪と氷の島',
+  killY: -30, seed: 20261126, seedTotal: 7,
+  start: { x: 0, y: 0, z: 14, yaw: Math.PI },
+  // 空：上は夕暮れのむらさき、地平線はあかね色、太陽は北西の低いところ
+  env: {
+    top: [0.2, 0.2, 0.5], bottom: [0.72, 0.56, 0.72], sun: [1.0, 0.5, 0.24],
+    fogCol: [0.98, 0.68, 0.55], fog: [40, 145], light: [-0.55, 0.36, -0.75],
+  },
+  music: { key: -3, bpm: 112 },
+  tint: [1.0, 0.9, 0.88],
+  cloud: { lo: hex(0xc4a2c6), far: hex(0xf6b496), top: hex(0xffe2d2) },
+  titleCam: { r: 62, y: 28, tx: 0, ty: 3, tz: 0 },
+  color: '#ffb38a',
+  unlock: { stage: 0, seeds: 4 },
+  build: buildStage2,
+});
+
+// 風のつり橋：風の周期（秒）。しずか → 前ぶれ → 強い風
+const WIND = { period: 3.6, calm: 1.5, warn: 0.5, push: 4.2 };
+function windGust(t) {
+  const p = t % WIND.period, g0 = WIND.calm + WIND.warn;
+  if (p < WIND.calm) return 0;
+  if (p < g0) return -1; // 前ぶれ（まだ押さない）
+  return clamp((p - g0) / 0.15, 0, 1) * clamp((WIND.period - p) / 0.15, 0, 1);
 }
 
-// 種を出す（メッセージつき）
-function revealSeedMsg(id, msg) {
-  const s = Level.seeds.find((q) => q.id === id);
-  if (!s || !s.hidden) return;
-  s.hidden = false;
-  Sound.play('seed');
-  Fx.burst(s.x, s.y + 0.7, s.z, [0.7, 1, 0.95], 24, 6);
-  Game.toast(msg, 4);
-}
+function buildStage2(K) {
+  const { g, rng, once, onceStage, kindColor, block, sign, flag, mover, faller, launcher, acornAt, acornLine, acornRing, seedAt, heartAt, hopperAt } = K;
+  void onceStage;
+  const S2 = Level.s2 = { windT: 0, gustOn: false, slab: null, broken: false, icicles: [], balls: [], lamps: [], crystals: [] };
+  Level.arenaSeed = { id: 5, msg: 'ゆきだるんを ぜんぶ たおした！ ひかりの種が あらわれた！' };
+  Level.arenaName = 'ゆきだるん';
 
-// 動く足場・ばねなどの更新
-function updateLevel(dt) {
-  for (const s of World.solids) { s.dx = s.dy = s.dz = 0; if (s.rotY) s.rotY = 0; }
-  for (const mv of Level.movers) {
-    mv.t += dt * mv.speed;
-    const k = 0.5 - 0.5 * Math.cos(mv.t * Math.PI); // 0〜1 往復
-    const s = mv.s;
-    const cx = (s.x0 + s.x1) / 2, cy = (s.y0 + s.y1) / 2, cz = (s.z0 + s.z1) / 2;
-    if (mv.axis === 'x') World.move(s, lerp(mv.ax, mv.bx, k) - cx, 0, 0);
-    if (mv.axis === 'z') World.move(s, 0, 0, lerp(mv.az, mv.bz, k) - cz);
-    if (mv.axis === 'y') World.move(s, 0, lerp(mv.ay, mv.by, k) - cy, 0);
-  }
-  // 回る橋
-  for (const sp of Level.spinners) World.rotate(sp.s, sp.speed * dt);
-  // 落ちる足場：乗る → ぐらぐら（1秒）→ 落ちる → 消える → 元の場所に戻る
-  const onS = P.grounded ? P.groundS : null;
-  for (const f of Level.fallers) {
-    const s = f.s;
-    f.t += dt;
-    if (f.state === 'idle') {
-      if (onS === s) { f.state = 'shake'; f.t = 0; Sound.play('land'); }
-    } else if (f.state === 'shake') {
-      if (f.t > 1.0) { f.state = 'fall'; f.t = 0; f.vy = 0; }
-    } else if (f.state === 'fall') {
-      f.vy = Math.min(f.vy + 30 * dt, 30);
-      World.move(s, 0, -f.vy * dt, 0);
-      if (f.t > 2.2) { f.state = 'gone'; f.t = 0; s.off = true; }
-    } else if (f.state === 'gone' && f.t > 2.5) {
-      // 主人公が元の場所にいなければ戻す
-      const cx = (s.x0 + s.x1) / 2, cz = (s.z0 + s.z1) / 2;
-      const inside = Math.abs(P.x - cx) < f.sx / 2 + 0.6 && Math.abs(P.z - cz) < f.sz / 2 + 0.6 && Math.abs(P.y - f.base) < 2;
-      if (!inside) {
-        World.move(s, 0, f.base - s.y0, 0);
-        s.dy = 0;
-        s.off = false; f.state = 'idle'; f.t = 0;
-        Fx.burst(cx, s.y1, cz, [1, 0.95, 0.8], 6, 2);
-      }
+  // ---------- 色 ----------
+  const SNOW = hex(0xf3f7ff), SNOW2 = hex(0xdde6f5), SNOWSH = hex(0xc9d3ea);
+  const ROCK = hex(0x8d88a6), ROCKDK = hex(0x5f5a7a), ICE = hex(0xa9e4ff), ICEDK = hex(0x6fbde8);
+  const snowTop = (p, n) => (n[1] > 0.5 ? mixc(SNOW2, SNOW, 0.55 + 0.45 * Math.sin(p[0] * 2.1 + p[2] * 1.7)) : p[1] > 0.6 ? SNOW2 : SNOWSH);
+  const rockSide = (p) => mixc(ROCKDK, ROCK, clamp(p[1] * 0.9 + 0.1 + 0.12 * Math.sin(p[1] * 11 + p[0]), 0, 1));
+  const iceCol = (p, n) => (n[1] > 0.5 ? mixc(ICE, hex(0xe6f8ff), 0.3 + 0.3 * Math.sin(p[0] * 4 + p[2] * 3)) : mixc(ICEDK, ICE, clamp(p[1] + 0.5, 0, 1)));
+
+  // ---------- 部品 ----------
+  // 雪の島（円柱）
+  function snowIsland(x, z, r, top, depth = 8) {
+    World.cyl(x, z, r, top - depth * 0.6, top, 'snow');
+    g.cyl(T(x, top - 0.6, z, r, 0.6, r), snowTop, 32);
+    g.cyl(T(x, top - 0.6 - depth, z, r * 0.98, depth, r * 0.98), rockSide, 28, { bottom: 0.2, top: 1, caps: false, flat: true });
+    // ふちの雪のたれ
+    for (let i = 0; i < 14; i++) {
+      const a = (i / 14) * TAU + rng() * 0.3;
+      g.sphere(T(x + Math.cos(a) * r * 0.97, top - 0.75, z + Math.sin(a) * r * 0.97, 0.9 + rng() * 0.6, 0.45, 0.9 + rng() * 0.6, a), SNOW2, 7, 4, { flat: true });
     }
   }
-  // 杭：打ちこまれたら沈む
-  for (const st of Level.stakes) {
-    const s = st.s;
-    if (st.down && s.y1 > st.ground + 0.06) World.move(s, 0, -Math.min(dt * 7, s.y1 - (st.ground + 0.06)), 0);
+  // 雪をかぶった箱（当たり判定つき）
+  function snowBox(x0, y0, z0, x1, y1, z1, kind = 'snow') {
+    const s = World.box(x0, y0, z0, x1, y1, z1, kind);
+    const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, sx = Math.abs(x1 - x0), sz = Math.abs(z1 - z0);
+    if (kind === 'ice') g.box(T(cx, (y0 + y1) / 2, cz, sx, y1 - y0, sz), iceCol);
+    else {
+      g.box(T(cx, (y0 + y1) / 2 - 0.15, cz, sx, y1 - y0 - 0.3, sz), rockSide);
+      g.box(T(cx, y1 - 0.15, cz, sx + 0.08, 0.3, sz + 0.08), snowTop);
+    }
+    return s;
   }
-  // 雲の飛び石：下から浮かんでくる
-  for (const r of Level.risers) {
-    if (!r.active) continue;
-    r.t += dt;
-    const s = r.s;
-    const k = clamp(r.t / 1.6, 0, 1);
-    const want = r.top - 30 * Math.pow(1 - k, 3);
-    if (r.t <= 0) continue;
-    s.off = false;
-    World.move(s, 0, want - s.y1, 0);
-  }
-  // 風の筒：乗ったら飛ばす
-  for (const L of Level.launchers) {
-    L.t += dt;
-    if (P.grounded && P.groundS === L.s && (P.state === 'ground' || P.state === 'punch')) {
-      const k = L.s.launch;
-      P.grounded = false; P.groundS = null;
-      P.state = 'air'; P.airT = 0; P.stateT = 0;
-      P.yaw = k.yaw; P.speed = k.sp;
-      P.vx = Math.sin(k.yaw) * k.sp; P.vz = Math.cos(k.yaw) * k.sp; P.vy = k.vy;
-      P.longJump = true; P.jumpHeld = true; P.flip = 0.001; P.flipDir = 1; P.jumpN = 0;
-      Sound.play('spring');
-      Fx.burst(L.x, L.y + 0.3, L.z, [0.7, 0.9, 1], 16, 6);
+  // 雪をかぶった針葉樹
+  function snowPine(x, y, z, s = 1) {
+    World.cyl(x, z, 0.4 * s, y, y + 4 * s, 'wood');
+    g.cyl(T(x, y, z, 0.3 * s, 1.2 * s, 0.3 * s), COL.trunk, 6);
+    for (let i = 0; i < 3; i++) {
+      const r = (1.6 - i * 0.4) * s, yy = y + (1 + i * 1.1) * s;
+      g.cyl(T(x, yy, z, r, 1.8 * s, r), (p) => (p[1] > 0.45 ? SNOW : mixc(hex(0x2f6b5a), hex(0x3f8a6a), p[1] * 2)), 8, { top: 0, flat: true });
     }
   }
-  for (const m of Level.mills) m.a += dt * 0.9;
-  for (const f of Level.flags) f.t += dt;
-  for (const s of Level.springs) s.boing = Math.max(0, (s.boing || 0) - dt * 3);
-}
-
-// ヒップドロップで杭を打つ（75_entities.js の poundShock から呼ぶ）
-function poundStakes(x, y, z) {
-  for (const st of Level.stakes) {
-    if (st.down) continue;
-    const s = st.s;
-    if (Math.hypot(x - s.x, z - s.z) < s.r + 0.45 && Math.abs(y - s.y1) < 0.35) {
-      st.down = true;
-      Sound.play('stomp');
-      Fx.burst(s.x, s.y1, s.z, [0.9, 0.75, 0.5], 12, 5);
-      const left = Level.stakes.filter((q) => !q.down).length;
-      if (left > 0) Game.toast(`杭を打った！ あと ${left} 本`, 2);
-      else if (!Level.stakeDone) {
-        Level.stakeDone = true;
-        Level.risers.forEach((r, i) => { r.active = true; r.t = -i * 0.45; });
-        Sound.play('seed');
-        Game.toast('南東の雲の下から 飛び石が うかんできた！', 4);
-      }
-    }
+  function snowRock(x, y, z, s) {
+    World.cyl(x, z, s * 0.9, y - 1, y + s * 0.9, 'stone');
+    g.sphere(T(x, y, z, s, s * 0.9, s * 0.95, rng() * 3), (p) => (p[1] > 0.45 ? SNOW : mixc(ROCKDK, ROCK, p[1] * 0.5 + 0.5)), 7, 5, { flat: true });
   }
-}
-
-function drawLevel() {
-  // 空
-  gl.depthMask(false);
-  gl.disable(gl.CULL_FACE);
-  drawMesh(Models.sky, T(R.cam[0], R.cam[1], R.cam[2], 300, 300, 300), WHITE, 1, 1);
-  gl.enable(gl.CULL_FACE);
-  gl.depthMask(true);
-  drawMesh(Level.cloudMesh, T(), WHITE, 0.55, 1);
-  drawMesh(Level.static, M4.ident());
-  const t = Game.time;
-  for (const mv of Level.movers) {
-    const s = mv.s;
-    drawMesh(mv.mesh, T((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2, (s.z0 + s.z1) / 2));
-  }
-  for (const sp of Level.spinners) {
-    const s = sp.s;
-    drawMesh(sp.mesh, T(s.cx, (s.y0 + s.y1) / 2, s.cz, 1, 1, 1, s.ang));
-  }
-  for (const f of Level.fallers) {
-    if (f.state === 'gone') continue;
-    const s = f.s;
-    const sh = f.state === 'shake' ? 0.08 : 0;
-    drawMesh(f.mesh, T((s.x0 + s.x1) / 2 + Math.sin(t * 60) * sh, (s.y0 + s.y1) / 2, (s.z0 + s.z1) / 2 + Math.cos(t * 53) * sh), f.state === 'idle' ? WHITE : [1, 0.85, 0.75]);
-  }
-  for (const r of Level.risers) {
-    if (r.s.off) continue;
-    const s = r.s;
-    drawMesh(r.mesh, T((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2 + Math.sin(t * 1.6 + s.x0) * 0.04, (s.z0 + s.z1) / 2));
-  }
-  for (const st of Level.stakes) {
-    const s = st.s;
-    drawMesh(Models.stake, T(s.x, s.y1 - 2.9, s.z), st.down ? [0.85, 0.85, 0.85] : WHITE);
-  }
-  for (const L of Level.launchers) {
-    const k = 0.5 + 0.5 * Math.sin(L.t * 5);
-    drawMesh(Models.launcher, T(L.x, L.y, L.z, 1, 1, 1, L.yaw), WHITE, 0.2 + k * 0.4);
-  }
-  for (const m of Level.mills) {
-    const mm = T(m.x, m.y, m.z, 1, 1, 1, m.yaw);
-    M4.rotZ(mm, m.a);
-    drawMesh(Models.millBlades, mm);
-  }
-  // 旗の布：細い帯を波打たせる
-  for (const f of Level.flags) {
-    const n = 5, w = 1.3 / n;
+  // 雪の上のでこぼこ（見た目だけ）
+  function drifts(cx, cz, r0, r1, y, n, avoid = []) {
     for (let i = 0; i < n; i++) {
-      const u = (i + 0.5) / n;
-      const wave = Math.sin(f.t * 5 - i * 0.9) * 0.18 * u;
-      drawMesh(Models.flagCloth2, T(f.x + 0.08 + u * 1.3, f.y - 0.35 - u * 0.08, f.z + wave, w * 1.02, 0.72 - u * 0.1, 0.05, Math.sin(f.t * 5 - i * 0.9) * 0.3), f.col);
+      const a = rng() * TAU, r = r0 + rng() * (r1 - r0);
+      const x = cx + Math.cos(a) * r, z = cz + Math.sin(a) * r;
+      if (avoid.some(([ax, az, ar]) => Math.hypot(x - ax, z - az) < ar)) continue;
+      if (rng() < 0.7) g.sphere(T(x, y - 0.05, z, 0.5 + rng() * 0.6, 0.18, 0.4 + rng() * 0.5, rng() * 3), SNOW, 7, 4, { flat: true });
+      else g.cyl(T(x, y, z, 0.05, 0.4, 0.05), ROCKDK, 4, { top: 0.2, caps: false }); // かれ枝
     }
   }
-  for (const s of Level.springs) {
-    const b = s.boing || 0;
-    drawMesh(Models.spring, T((s.x0 + s.x1) / 2, s.y0, (s.z0 + s.z1) / 2, 1, 1 + Math.sin(b * 12) * b * 0.6, 1));
+  // 灯り（ゆうやけでもぽっと光る。光は drawers で描く）
+  function lamp(x, y, z) {
+    World.cyl(x, z, 0.16, y, y + 1.6, 'wood').noCam = true;
+    g.cyl(T(x, y, z, 0.08, 1.5, 0.08), hex(0x4a3b55), 6);
+    g.box(T(x, y + 1.62, z, 0.34, 0.36, 0.34), hex(0xffd38a));
+    g.cyl(T(x, y + 1.8, z, 0.26, 0.16, 0.26), hex(0x4a3b55), 6, { top: 0 });
+    S2.lamps.push([x, y + 1.62, z]);
+  }
+  // 氷の結晶（ほんのり光る。drawers で描く）
+  function crystal(x, y, z, s, a = 0) { S2.crystals.push({ x, y, z, s, a }); }
+  // つらら（近づくとゆれて落ちてくる）。y は根元の高さ
+  function icicle(x, y, z) {
+    S2.icicles.push({ x, y0: y, z, y, vy: 0, state: 'idle', t: 0, grow: 1 });
+  }
+  // 雪だるまの敵「ゆきだるん」：その場で向きを変えて、雪玉を山なりに投げてくる
+  const snowmanAt = (x, y, z, arena = false) => Level.enemies.push({ type: 'snowman', x, y, z, hx: x, hz: z, yaw: rng() * TAU, alive: true, t: rng() * 5, cd: 1.2 + rng(), wind: 0, squish: 1, arena });
+
+  // ================= 中央の雪原 =================
+  snowIsland(0, 0, 24, 0, 10);
+  // かまくら（上にも乗れる）
+  World.cyl(-9, 7, 2.2, -0.5, 1.9, 'snow');
+  g.sphere(T(-9, 0, 7, 2.4, 2.1, 2.4), SNOW, 16, 8, { flat: true });
+  g.box(T(-9, 0.6, 9.3, 1.1, 1.2, 0.3), hex(0x3a3450));
+  for (let i = 0; i < 4; i++) acornAt(-9 + Math.cos(i * 1.57) * 0.9, 2.1, 7 + Math.sin(i * 1.57) * 0.9); // ひみつ：かまくらの上
+  snowPine(9, 0, 9, 1.0); snowPine(14, 0, -3, 1.2); snowPine(-14, 0, -4, 1.1); snowPine(-17, 0, 8, 0.9);
+  snowPine(6, 0, -15, 1.0); snowPine(-6, 0, -16, 0.9); snowPine(18, 0, 8, 0.8); snowPine(-4, 0, 20, 0.8);
+  snowRock(11, 0, 17, 1.2); snowRock(-20, 0, -2, 1.0); snowRock(16, 0, -12, 0.9);
+  drifts(0, 0, 3, 23, 0, 90, [[0, 14, 2], [-9, 7, 3], [0, -22, 3], [22, 0, 3], [0, 22, 3]]);
+  lamp(2, 0, -21.5); lamp(-2, 0, -21.5); lamp(21, 0, 2.6); lamp(2.8, 0, 22); lamp(-2.8, 0, 22);
+  lamp(15.5, 0, 15.5); lamp(14.5, 0, -15.5); lamp(-15.6, 0, -11.5);
+  sign(2.4, 0, 11.5, 0, ['ひかりの種は ぜんぶで 7こ', '氷の上は つるつる すべるよ！']);
+  acornRing(0, 0, 8, 2.6, 6);
+  acornLine(0, 0, 3, 0, 0, -12, 4);
+  hopperAt(10, 0, 2, 3);
+  snowmanAt(-11, 0, -2);
+
+  // ================= 種0 北：風のつり橋 =================
+  {
+    const z0 = -23.4, z1 = -54, hw = 1.3;
+    const walls = [-29, -36, -43, -50];
+    S2.walls = walls;
+    S2.bridge = { x0: -10, x1: 10, z0: z1 + 0.5, z1: z0 - 0.4 };
+    // 橋の板：風よけのかげは安全な場所、それ以外は落ちたら戻れない場所（noSafe）
+    const cuts = [z0];
+    for (const w of walls) cuts.push(w + 1.4, w - 1.4);
+    cuts.push(z1);
+    for (let i = 0; i < cuts.length - 1; i++) {
+      const a = cuts[i], b = cuts[i + 1];
+      const s = World.box(-hw, -0.5, b, hw, 0, a, 'wood');
+      if (i % 2 === 0) s.noSafe = true;
+    }
+    const plank = (p, n) => (n[1] > 0.5 ? mixc(COL.woodDk, COL.wood, 0.6) : COL.woodDk);
+    for (let z = z0; z > z1; z -= 0.55) g.box(T((rng() - 0.5) * 0.06, -0.12, z - 0.27, hw * 2, 0.24, 0.48, (rng() - 0.5) * 0.04), plank);
+    g.box(T(0, -0.4, (z0 + z1) / 2, hw * 1.7, 0.2, Math.abs(z1 - z0)), COL.woodDk);
+    // 支柱となわ（見た目だけ。当たり判定はない）
+    for (let z = z0 - 1; z > z1; z -= 3.4) {
+      for (const sx of [-1, 1]) g.cyl(T(sx * (hw + 0.05), -0.3, z, 0.08, 1.3, 0.08), COL.woodDk, 5);
+    }
+    for (const sx of [-1, 1]) g.box(T(sx * (hw + 0.05), 0.85, (z0 + z1) / 2, 0.05, 0.05, Math.abs(z1 - z0)), hex(0xc9a77a));
+    // 風よけ（西のはしに立つ雪のかべ）。風は西から東へふく
+    for (const w of walls) {
+      World.box(-hw, 0, w - 1.1, -0.75, 1.5, w + 1.1, 'snow');
+      g.box(T(-hw + 0.27, 0.7, w, 0.55, 1.4, 2.2), SNOW2);
+      g.sphere(T(-hw + 0.27, 1.4, w, 0.34, 0.25, 1.15), SNOW, 8, 4, { flat: true });
+      acornAt(0.2, 0, w);
+    }
+    acornLine(0, 0, -25.5, 0, 0, -26.8, 2);
+    // 北の島
+    snowIsland(0, -62, 9, 0, 8);
+    snowBox(-1.4, -0.5, -65.4, 1.4, 0.8, -62.6, 'stone');
+    seedAt(0, 0, 0.8, -64, '風のつり橋のむこう');
+    snowPine(-5, 0, -65, 0.9); snowPine(5.5, 0, -63, 1.0); snowRock(-3.5, 0, -57.5, 0.8);
+    drifts(0, -62, 2.5, 8.5, 0, 16, [[0, -64, 2.5]]);
+    acornRing(0, 0, -62, 5.2, 7, 0.4);
+    snowmanAt(4, 0, -59);
+    heartAt(-4.5, 0, -60);
+    lamp(-1.8, 0, -54.5); lamp(1.8, 0, -54.5);
+    sign(-2.6, 0, -21.2, Math.PI, ['つり橋は 横風が ふく！', '雪が とんできたら 風よけの かげで まとう']);
+  }
+
+  // ================= 種1 東：凍った池と ほらあな =================
+  {
+    // 氷の道（つるつる）
+    snowBox(22.5, -0.6, -1.6, 32, 0, 1.6, 'ice');
+    acornLine(25, 0, 0, 30, 0, 0, 3);
+    // 池の島（まんなかに穴をあけるため、箱を組み合わせる）
+    const X0 = 32, X1 = 48, Z0 = -8, Z1 = 8, cx = 40, hh = 1.2, top = 0, bot = -6;
+    snowBox(X0, bot, Z0, X1, top, -hh);
+    snowBox(X0, bot, hh, X1, top, Z1);
+    snowBox(X0, bot, -hh, cx - hh, top, hh);
+    snowBox(cx + hh, bot, -hh, X1, top, hh);
+    // 池の氷（少しだけ高い。つるつる）
+    const ice = (x0, z0, x1, z1) => { World.box(x0, -0.1, z0, x1, 0.02, z1, 'ice'); g.box(T((x0 + x1) / 2, -0.04, (z0 + z1) / 2, x1 - x0, 0.13, z1 - z0), iceCol); };
+    ice(34.5, -5.5, 45.5, -hh); ice(34.5, hh, 45.5, 5.5); ice(34.5, -hh, cx - hh, hh); ice(cx + hh, -hh, 45.5, hh);
+    // まんなかの ひびの入った氷（ヒップドロップで割れる）
+    S2.slab = World.box(cx - hh, -0.3, -hh, cx + hh, 0.02, hh, 'ice');
+    S2.slab.noSafe = true;
+    for (const [x, z] of [[34, -6.5], [46, -6.5], [34, 6.5], [46, 6.5]]) snowRock(x, 0, z, 0.7);
+    snowPine(45.5, 0, -7, 0.8); snowPine(33.5, 0, 7.2, 0.7);
+    acornRing(cx, 0.02, 0, 3.6, 8, 0.2);
+    sign(31, 0, 3.4, -Math.PI / 2, ['池のまんなかに ひびが…？', '空中で しゃがむと ヒップドロップ']);
+    // ほらあな（池の下）
+    // 床（ほらあなの中は暗い色の岩）。東の戸口の床もつなげる
+    const caveFloor = (p, n) => (n[1] > 0.5 ? mixc(hex(0x5a5878), hex(0x6c6a8c), 0.5 + 0.5 * Math.sin(p[0] * 1.3 + p[2] * 0.9)) : hex(0x3c3858));
+    World.box(33, -11, -7, 47, -9, 7, 'stone'); g.box(T(40, -10, 0, 14, 2, 14), caveFloor);
+    World.box(47, -11, -1.4, 48, -9, 1.4, 'stone'); g.box(T(47.5, -10, 0, 1, 2, 2.8), caveFloor);
+    const wallC = (p) => mixc(hex(0x4a4566), hex(0x6a6488), clamp(p[1] * 0.5 + 0.5 + 0.1 * Math.sin(p[2] * 7), 0, 1));
+    const cw = (x0, y0, z0, x1, y1, z1) => { World.box(x0, y0, z0, x1, y1, z1, 'stone'); g.box(T((x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2, x1 - x0, y1 - y0, z1 - z0), wallC); };
+    cw(X0, -11, Z0, X1, -6, -7); cw(X0, -11, 7, X1, -6, Z1); cw(X0, -11, -7, 33, -6, 7);
+    cw(47, -11, -7, X1, -6, -1.4); cw(47, -11, 1.4, X1, -6, 7); cw(47, -6.6, -1.4, X1, -6, 1.4);
+    // 天井（島の底）の見た目と、氷のつらら（見た目）
+    g.box(T(40, -6.05, 0, 14, 0.1, 14), hex(0x3c3858));
+    for (let i = 0; i < 16; i++) {
+      const x = 34 + rng() * 12, z = -6 + rng() * 12;
+      if (Math.abs(x - cx) < 2 && Math.abs(z) < 2) continue;
+      const l = 0.4 + rng() * 0.7;
+      g.cyl(T(x, -6 - l, z, 0.12 + rng() * 0.1, l, 0.12 + rng() * 0.1), ICE, 6, { bottom: 0, flat: true });
+    }
+    for (const [x, z, s, a] of [[34.2, -5.6, 1.2, 0.3], [35.5, -6.2, 0.8, 1.2], [45.6, 5.8, 1.1, 0.6], [44, 6.2, 0.7, 2], [34, 5.5, 0.9, 1.4], [46, -5.5, 1, 0.2]]) crystal(x, -9, z, s, a);
+    snowBox(35, -9, -5.6, 37, -8.4, -3.4, 'stone');
+    seedAt(1, 36, -8.4, -4.5, '池の下のほらあな');
+    acornLine(38.5, -9, 1.5, 38.5, -9, 5, 3);
+    acornLine(41.5, -9, -1.5, 41.5, -9, -5, 3);
+    heartAt(44.5, -9, -4);
+    // 出口：東の戸口 → 外の岩だな → ふきあげの穴で池の島へ
+    snowBox(48, -11, -2.6, 55.5, -9, 2.6, 'stone');
+    launcher(53.6, -9, 0, Math.atan2(-0.85, -0.53), 30, 7);
+    acornLine(50.4, -6, 0, 48.6, -1, 0, 3);
+  }
+
+  // ================= 種2 西：氷の柱のぼり → 雪山 =================
+  const PILLARS = [[-21.6, -14.5, 1.6], [-25, -15.6, 3.2], [-28.4, -16.6, 4.8], [-31.8, -17.2, 6.4], [-35.2, -17, 8.0], [-38.6, -16.4, 9.6], [-42, -17, 11.2]];
+  S2.pillars = PILLARS;
+  {
+    for (const [x, z, top] of PILLARS) {
+      World.cyl(x, z, 1.3, top - 16, top, 'ice');
+      g.cyl(T(x, top - 16, z, 1.3, 16, 1.3), iceCol, 10, { flat: true });
+      g.cyl(T(x, top - 0.02, z, 1.05, 0.04, 1.05), hex(0xe6f8ff), 10);
+      acornAt(x, top + 0.4, z);
+    }
+    sign(-17, 0, -13.2, Math.PI / 2, ['氷の柱は 止まれない！', '着地したら すぐ 次へ ジャンプ']);
+    // 雪山（台地）
+    snowBox(-56, -10, -23, -44.5, 12, -11);
+    for (let i = 0; i < 5; i++) g.sphere(T(-56 + rng() * 11, 12, -23 + rng() * 2, 1.2 + rng(), 0.6, 1, rng() * 3), SNOW, 7, 4, { flat: true });
+    snowPine(-54, 12, -21, 1.1); snowPine(-46.5, 12, -21.5, 0.9); snowRock(-55, 12, -14, 0.9);
+    crystal(-50, 12, -21, 1.6, 0.4); crystal(-48.6, 12, -20.4, 1.0, 1.5);
+    seedAt(2, -50, 12, -18, '雪山のてっぺん');
+    heartAt(-46.5, 12, -13);
+    acornRing(-50, 12, -18, 2.6, 5, 0.3);
+    flag(-45.5, 12, -12, hex(0xffd166));
+  }
+
+  // ================= 種3 南西：長いすべり台 → 雪すべりの島 =================
+  {
+    const x0 = -54, x1 = -49, za = -11, zb = 13, ya = 12, yb = 3.6;
+    S2.slide = { x0, x1, za, zb, ya, yb };
+    const r = World.ramp(x0, za, x1, zb, yb - 3, 'z', ya, yb, 'snow');
+    r.noSafe = true;
+    const len = zb - za, ang = Math.atan2(ya - yb, len), hyp = Math.hypot(len, ya - yb);
+    const mx = (x0 + x1) / 2, mz = (za + zb) / 2, my = (ya + yb) / 2;
+    g.box(T(mx, my - Math.cos(ang) * 0.3, mz + Math.sin(ang) * 0.3, x1 - x0, 0.6, hyp + 0.2, 0, ang), (p, n) => (n[1] > 0.5 ? SNOW : SNOW2));
+    // すべり台のみぞの線と、両側のへり（へりにも当たり判定）
+    for (const sx of [-1, 1]) {
+      const ex = sx < 0 ? x0 - 0.35 : x1 + 0.35;
+      World.ramp(ex - 0.35, za, ex + 0.35, zb, yb - 3, 'z', ya + 0.7, yb + 0.7, 'snow').noCam = true;
+      g.box(T(ex, my + 0.35, mz, 0.7, 0.7, hyp + 0.2, 0, ang), (p, n) => (n[1] > 0.5 ? SNOW : hex(0x7fb8e8)));
+    }
+    g.box(T(mx, my + 0.02, mz, 0.12, 0.05, hyp, 0, ang), hex(0xbfe0ff));
+    // 支え
+    for (let i = 1; i < 5; i++) {
+      const z = lerp(za, zb, i / 5), y = lerp(ya, yb, i / 5);
+      g.cyl(T(mx, y - 14, z, 0.5, 13.6, 0.5), rockSide, 8, { flat: true });
+    }
+    // すべる道すじのどんぐり
+    for (let i = 0; i < 6; i++) { const t = (i + 0.5) / 6; acornAt(mx, lerp(ya, yb, t), lerp(za, zb, t)); }
+    // 幅とびの軌道の目安
+    for (let i = 0; i < 3; i++) acornAt(mx, yb + 1.0 - i * 1.0, zb + 3.5 + i * 4);
+    sign(-47.5, 12, -12.2, 0, ['すべり台は しゃがんで すべろう', 'いきおいのまま 幅とび！']);
+    // 雪すべりの島
+    const ix = mx, iz = zb + 14.5 + 8;
+    snowIsland(ix, iz, 8, 0, 7);
+    snowBox(ix - 1.2, -0.5, iz + 1.3, ix + 1.2, 0.6, iz + 3.7, 'stone');
+    seedAt(3, ix, 0.6, iz + 2.5, '雪すべりの島');
+    snowPine(ix - 4.5, 0, iz + 3, 0.9); snowRock(ix + 4.5, 0, iz + 3.5, 0.9);
+    drifts(ix, iz, 2, 7.5, 0, 14, [[ix, iz + 2.5, 2]]);
+    acornRing(ix, 0, iz, 4.2, 6, 0.5);
+    // 帰り：ふきあげの穴で中央の雪原へ
+    const dl = Math.hypot(ix, iz), ux = -ix / dl, uz = -iz / dl;
+    launcher(ix + ux * 5, 0, iz + uz * 5, Math.atan2(ux, uz), 27, 28);
+    S2.slideLauncher = Level.launchers[Level.launchers.length - 1];
+  }
+
+  // ================= 種4 南：つららの谷 =================
+  {
+    const hw = 2.2, wz0 = 23, wz1 = 58;
+    // 床（とちゅうに穴が2つ）
+    const floors = [[22, 30], [33.2, 40], [43.2, 52]];
+    for (const [a, b] of floors) snowBox(-hw, -4, a, hw, 0, b);
+    // 両側の岩のかべ・奥のかべ・高い棚
+    const wallC = (p, n) => (n[1] > 0.5 ? SNOW : mixc(ROCKDK, ROCK, clamp(p[1] * 0.6 + 0.4 + 0.12 * Math.sin(p[1] * 9 + p[2] * 2), 0, 1)));
+    for (const sx of [-1, 1]) {
+      const xa = sx < 0 ? -6.5 : hw, xb = sx < 0 ? -hw : 6.5;
+      World.box(xa, -6, wz0, xb, 9, wz1, 'stone');
+      g.box(T((xa + xb) / 2, 1.5, (wz0 + wz1) / 2, xb - xa, 15, wz1 - wz0), wallC);
+    }
+    World.box(-hw, -6, 56, hw, 9, wz1, 'stone');
+    g.box(T(0, 1.5, 57, hw * 2, 15, 2), wallC);
+    snowBox(-hw, -4, 52, hw, 4.6, 56, 'stone');
+    seedAt(4, 0, 4.6, 54.4, 'つららの谷のおく');
+    heartAt(1.2, 4.6, 53);
+    // 張り出した岩と、つらら
+    const spots = [[1, 26.5], [-1, 28.5], [1, 35], [-1, 37.2], [1, 44.5], [-1, 46.8], [0.9, 49.5]];
+    for (const [sx, z] of spots) {
+      const x = sx * 1.05;
+      const ex = sx > 0 ? hw : -hw;
+      g.box(T((ex + x * 0.55) / 2 + sx * 0.1, 6.9, z, Math.abs(ex - x * 0.55) + 0.2, 0.7, 1.8), wallC);
+      icicle(x, 6.6, z);
+    }
+    acornLine(0, 0, 24, 0, 0, 29, 3);
+    acornLine(0, 1.6, 31, 0, 1.6, 32.4, 2);
+    acornLine(0, 0, 34.5, 0, 0, 39, 3);
+    acornLine(0, 1.6, 41, 0, 1.6, 42.4, 2);
+    acornLine(0, 0, 44.5, 0, 0, 50.5, 4);
+    sign(3.2, 0, 21.4, Math.PI, ['つららの谷：上に 気をつけて 走りぬけよう', 'おくの 高い棚へは バク宙（止まって しゃがみ＋ジャンプ）']);
+    lamp(-1.6, 0, 51.5);
+  }
+
+  // ================= 種5 南東：ゆきだるん広場 =================
+  {
+    snowBox(18.6, -1, 18.1, 21.2, 0.4, 20.7);
+    snowBox(21.7, -1, 20.4, 24.1, 0.8, 22.8);
+    acornAt(19.9, 0.4, 19.4); acornAt(22.9, 0.8, 21.6);
+    const ix = 34, iz = 30;
+    snowIsland(ix, iz, 10, 1.2, 8);
+    // 種が出る台と雪の輪
+    for (let i = 0; i < 8; i++) { const a = (i / 8) * TAU; g.sphere(T(ix + Math.cos(a) * 1.8, 1.2, iz + Math.sin(a) * 1.8, 0.45, 0.3, 0.45), SNOW, 7, 4, { flat: true }); }
+    seedAt(5, ix, 1.2, iz, 'ゆきだるん広場', true);
+    snowmanAt(ix - 5, 1.2, iz - 3, true); snowmanAt(ix + 4.5, 1.2, iz - 4.5, true); snowmanAt(ix + 3, 1.2, iz + 5.5, true);
+    hopperAt(ix - 4, 1.2, iz + 4.5, 2.5, true);
+    snowPine(ix + 7, 1.2, iz + 3, 0.9); snowPine(ix - 6.5, 1.2, iz + 6, 0.8); snowRock(ix + 6.5, 1.2, iz - 5, 0.8);
+    drifts(ix, iz, 2.5, 9, 1.2, 18, [[ix, iz, 2.4]]);
+    acornRing(ix, 1.2, iz, 6.8, 8, 0.2);
+    heartAt(ix + 7.5, 1.2, iz - 1);
+    sign(17.6, 0, 15.2, Math.PI * 0.75, ['ゆきだるんは 雪玉を なげてくる', 'ぜんぶ たおすと…？ ふんでも パンチでも OK']);
+  }
+
+  // ================= 種6 北東：灯台の島 =================
+  {
+    const zc = -20.5;
+    snowBox(19, -1, zc - 1.5, 22, 0.4, zc + 1.5);
+    mover(29.5, 0.7, zc, 3, 0.6, 3, 'snow', 'x', 25, 34, 0.42);
+    acornLine(26, 1.7, zc, 33, 1.7, zc, 3);
+    snowBox(36.5, -1, zc - 1.5, 39.5, 1.0, zc + 1.5, 'stone');
+    mover(43.2, 0.7, zc, 2.8, 0.6, 2.8, 'snow', 'y', 0.7, 6.7, 0.38);
+    // ぐらぐら足場（乗ると すぐ落ちる）
+    const fx = [47.6, 50.8, 54.0];
+    for (const x of fx) { faller(x, 7.0, zc, 2.4, 2.4); acornAt(x, 7.3, zc); }
+    const ix = 62, iz = -21;
+    snowIsland(ix, iz, 6.5, 7, 7);
+    // 灯台（てっぺんの灯りは drawers で光らせる）
+    World.cyl(ix + 2.2, iz - 1.5, 1.6, 7, 16, 'stone');
+    // 赤と白のしま（頂点の色では しまが出ないので、輪切りにして重ねる）
+    for (let i = 0; i < 6; i++) {
+      const r0 = lerp(1.7, 1.33, i / 6), r1 = lerp(1.7, 1.33, (i + 1) / 6);
+      g.cyl(T(ix + 2.2, 7 + i * 1.5, iz - 1.5, r0, 1.5, r0), i % 2 ? hex(0xf2efe8) : hex(0xd85a5a), 14, { top: r1 / r0, flat: true, caps: i === 5 });
+    }
+    g.cyl(T(ix + 2.2, 16, iz - 1.5, 1.5, 0.3, 1.5), hex(0x4a3b55), 14);
+    g.cyl(T(ix + 2.2, 17.4, iz - 1.5, 1.4, 0.8, 1.4), hex(0x4a3b55), 14, { top: 0 });
+    S2.beacon = [ix + 2.2, 16.85, iz - 1.5];
+    seedAt(6, ix - 2, 7, iz + 1, '灯台の島');
+    snowmanAt(ix - 2.5, 7, iz - 3.5);
+    heartAt(ix + 2.5, 7, iz + 3);
+    acornRing(ix - 2, 7, iz + 1, 2.8, 5, 0.6);
+    lamp(ix - 5, 7, iz - 1);
+    // 帰り：ふきあげの穴で中央の雪原へ
+    const dl = Math.hypot(ix, iz), ux = -ix / dl, uz = -iz / dl;
+    launcher(ix + ux * 4.2 + uz * 2.4, 7, iz + uz * 4.2 - ux * 2.4, Math.atan2(ux, uz), 26, 27);
+    sign(18.5, 0, -17.6, -Math.PI * 0.75, ['灯台の島へ！', 'ぐらぐら足場は 止まらずに わたろう']);
+  }
+
+  // ---- 動く物・飾りのメッシュ（全ステージで使い回す）----
+  if (!Models.snowman) buildStage2Models();
+  S2.iceSlabMesh = once('s2:slab', () => {
+    const gg = new Geo(0.02);
+    gg.box(T(0, 0, 0, 2.4, 0.32, 2.4), iceCol);
+    const crack = hex(0xffffff);
+    gg.box(T(0, 0.17, 0, 2.0, 0.02, 0.07, 0.5), crack);
+    gg.box(T(0.3, 0.17, 0.2, 1.3, 0.02, 0.06, -0.9), crack);
+    gg.box(T(-0.4, 0.17, -0.3, 0.9, 0.02, 0.06, 1.7), crack);
+    gg.box(T(-0.2, 0.17, 0.5, 0.7, 0.02, 0.05, 2.5), crack);
+    return gg.mesh();
+  });
+
+  // ---------- このステージの仕掛けの動き ----------
+  Level.updaters.push(updateStage2);
+  Level.drawers.push(drawStage2);
+  Level.poundHooks.push((x, y, z) => {
+    const s = S2.slab;
+    if (S2.broken || !s) return;
+    if (x > s.x0 - 0.35 && x < s.x1 + 0.35 && z > s.z0 - 0.35 && z < s.z1 + 0.35 && Math.abs(y - s.y1) < 0.4) {
+      S2.broken = true; s.off = true;
+      Sound.play('pound');
+      Fx.burst((s.x0 + s.x1) / 2, 0.1, (s.z0 + s.z1) / 2, [0.75, 0.95, 1], 22, 7);
+      Game.shake = 0.3;
+      Game.toast('氷が われた！ 下に ほらあなが…！', 3);
+    }
+  });
+}
+
+// つらら・風・雪玉の動き（updateLevel から毎フレーム呼ぶ）
+function updateStage2(dt) {
+  const S2 = Level.s2;
+  // 遊んでいる間だけ（タイトル・ステージ選びの背景では 主人公に当たらない）
+  const playing = P.state !== 'dead' && P.state !== 'win' && (Game.state === undefined || Game.state === 'play');
+  // ---- 風のつり橋 ----
+  S2.windT += dt;
+  const gust = windGust(S2.windT);
+  if (gust > 0 && !S2.gustOn) { S2.gustOn = true; if (Sound.noise && s2near(0, -38, 30)) Sound.noise(1.7, 0.1, 500, 1500, 'bandpass', 0, 0.6); }
+  if (gust <= 0) S2.gustOn = false;
+  S2.gust = gust;
+  const B = S2.bridge;
+  if (playing && gust > 0 && P.x > B.x0 && P.x < B.x1 && P.z > B.z0 && P.z < B.z1 && P.y > -8) {
+    // 風よけのかげ（かべの東側）にいれば押されない
+    const shelter = P.y < 2.4 && P.x > -0.85 && S2.walls.some((w) => Math.abs(P.z - w) < 1.3);
+    if (!shelter) P.x += WIND.push * gust * dt;
+  }
+  // ---- つらら ----
+  for (const ic of S2.icicles) {
+    ic.t += dt;
+    if (ic.state === 'idle') {
+      ic.grow = Math.min(1, ic.grow + dt * 1.6);
+      if (playing && ic.grow >= 1 && Math.abs(P.x - ic.x) < 2.2 && Math.abs(P.z - ic.z) < 3.0 && P.y < ic.y0 - 1) { ic.state = 'shake'; ic.t = 0; Sound.play('skid'); }
+    } else if (ic.state === 'shake') {
+      if (ic.t > 0.4) { ic.state = 'fall'; ic.t = 0; ic.vy = 0; }
+    } else if (ic.state === 'fall') {
+      ic.vy = Math.min(ic.vy + 32 * dt, 30);
+      ic.y -= ic.vy * dt;
+      const tip = ic.y - 1.25;
+      if (playing && Math.abs(P.x - ic.x) < 0.75 && Math.abs(P.z - ic.z) < 0.75 && tip < P.y + P.h && ic.y > P.y + 0.3) {
+        playerHurt(ic.x, ic.z);
+        shatterIcicle(ic);
+        continue;
+      }
+      const gb = groundBelow(ic.x, ic.z, ic.y, 0);
+      if ((gb && tip <= gb.y) || ic.y < World.killY) shatterIcicle(ic, gb ? gb.y : null);
+    } else if (ic.state === 'gone' && ic.t > 3) {
+      ic.state = 'idle'; ic.t = 0; ic.y = ic.y0; ic.grow = 0;
+    }
+  }
+  // ---- 雪玉 ----
+  const balls = S2.balls;
+  for (let i = balls.length - 1; i >= 0; i--) {
+    const b = balls[i];
+    b.t += dt;
+    const py = b.y;
+    b.vy -= 20 * dt;
+    b.x += b.vx * dt; b.y += b.vy * dt; b.z += b.vz * dt;
+    let hit = false;
+    if (playing && Math.hypot(P.x - b.x, P.y + 0.65 - b.y, P.z - b.z) < 0.85) { playerHurt(b.x - b.vx * 0.05, b.z - b.vz * 0.05); hit = true; }
+    const gb = !hit && groundBelow(b.x, b.z, py + 0.3, 0);
+    if (hit || (gb && b.y - 0.3 <= gb.y) || b.t > 4 || b.y < World.killY) {
+      Fx.burst(b.x, b.y, b.z, [1, 1, 1], 6, 3);
+      balls.splice(i, 1);
+    }
+  }
+}
+function s2near(x, z, r) { return Math.hypot(P.x - x, P.z - z) < r; }
+function shatterIcicle(ic, gy) {
+  ic.state = 'gone'; ic.t = 0;
+  Fx.burst(ic.x, gy !== null && gy !== undefined ? gy + 0.2 : ic.y - 1, ic.z, [0.75, 0.95, 1], 10, 4);
+  Sound.play('hit');
+}
+
+// ゆきだるん：主人公の方を向き、近ければ雪玉を山なりに投げる。踏む・パンチ・ヒップドロップでたおせる
+function updateSnowman(e, dt) {
+  e.t += dt;
+  e.squish = lerp(e.squish, 1, dt * 8);
+  const dx = P.x - e.x, dz = P.z - e.z, dist = Math.hypot(dx, dz), dy = P.y - e.y;
+  const see = dist < 14 && Math.abs(dy) < 6 && P.state !== 'dead' && P.state !== 'win';
+  if (see) e.yaw += clamp(angDiff(e.yaw, Math.atan2(dx, dz)), -dt * 3, dt * 3);
+  else e.yaw += dt * 0.3;
+  e.cd -= dt;
+  if (e.wind > 0) {
+    // 投げる前の ふりかぶり（0.45秒）
+    e.wind -= dt;
+    if (e.wind <= 0) {
+      const T0 = 0.6 + dist * 0.035;
+      const sx = e.x + Math.sin(e.yaw) * 0.6, sy = e.y + 1.6, sz = e.z + Math.cos(e.yaw) * 0.6;
+      const tx = P.x, ty = P.y + 0.65, tz = P.z;
+      Level.s2.balls.push({ x: sx, y: sy, z: sz, vx: (tx - sx) / T0, vy: (ty - sy + 0.5 * 20 * T0 * T0) / T0, vz: (tz - sz) / T0, t: 0 });
+      Sound.play('punch');
+      e.squish = 0.85;
+    }
+  } else if (see && e.cd <= 0 && dist > 2.2 && dist < 13) {
+    e.wind = 0.45; e.cd = 2.6;
+  }
+  // 足元（動く足場にも乗れるように）
+  const gb = groundBelow(e.x, e.z, e.y + 0.5, 0.3);
+  if (gb) { e.y = gb.y; e.x += gb.s.dx; e.z += gb.s.dz; }
+  else { e.y -= 10 * dt; if (e.y < World.killY) e.alive = false; }
+  enemyTouch(e, 0.68, 1.9);
+}
+
+function drawSnowman(e, tint) {
+  const lean = e.wind > 0 ? Math.sin((0.45 - e.wind) / 0.45 * Math.PI) * -0.25 : 0;
+  const bob = 1 + Math.sin(e.t * 3) * 0.02;
+  const sq = e.squish * bob;
+  drawMesh(Models.snowman, T(e.x, e.y, e.z, 1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq), e.yaw, lean), tint);
+  drawShadow(e.x, e.y + 0.1, e.z, 0.8);
+}
+
+// つらら・割れる氷・光・雪のふる様子
+function drawStage2(t, tint) {
+  const S2 = Level.s2;
+  if (!S2) return;
+  if (!S2.broken && S2.slab) {
+    const s = S2.slab;
+    drawMesh(S2.iceSlabMesh, T((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2, (s.z0 + s.z1) / 2), tint);
+  }
+  for (const ic of S2.icicles) {
+    if (ic.state === 'gone') continue;
+    const sh = ic.state === 'shake' ? Math.sin(t * 70) * 0.07 : 0;
+    const k = ic.grow;
+    drawMesh(Models.icicle, T(ic.x + sh, ic.y, ic.z, k, k, k), ic.state === 'shake' ? ICICLE_WARN : tint, 0.15);
+  }
+  for (const b of S2.balls) drawMesh(Models.snowball, T(b.x, b.y, b.z, 1, 1, 1, b.t * 6), WHITE, 0.2);
+  for (const c of S2.crystals) drawMesh(Models.crystal, T(c.x, c.y, c.z, c.s, c.s, c.s, c.a), WHITE, 0.45);
+  if (R.pass === 'shadow') return;
+  // 灯り・灯台の光
+  for (const l of S2.lamps) Sprites.add(l[0], l[1], l[2], 1.1 + Math.sin(t * 3 + l[0]) * 0.06, 1, 1, 0.78, 0.45, 0.45);
+  if (S2.beacon) {
+    const b = S2.beacon;
+    Sprites.add(b[0], b[1], b[2], 4.5 + Math.sin(t * 2) * 0.4, 2, 1, 0.85, 0.5, 0.75);
+    Sprites.add(b[0] + Math.sin(t * 1.2) * 2.2, b[1], b[2] + Math.cos(t * 1.2) * 2.2, 2.4, 2, 1, 0.9, 0.6, 0.5);
+  }
+  for (const c of S2.crystals) Sprites.add(c.x, c.y + c.s * 0.8, c.z, c.s * 2.2, 2, 0.5, 0.85, 1, 0.35);
+  // ふる雪：カメラのまわりの箱の中で、時間から位置を決める（状態を持たない）
+  const cx = R.cam[0], cy = R.cam[1], cz = R.cam[2];
+  const wx = S2.gust > 0 && cz < -18 && cz > -60 ? S2.gust * 9 : 0;
+  for (let i = 0; i < 160; i++) {
+    const h1 = fract(Math.sin(i * 12.9898) * 43758.5), h2 = fract(Math.sin(i * 78.233) * 12345.6), h3 = fract(Math.sin(i * 39.425) * 24634.6);
+    const x = cx + wrapM(h1 * 44 + t * (0.6 + wx) + Math.sin(t * 0.8 + i) * 0.4 - cx, 44) - 22;
+    const y = cy + 14 - wrapM(h2 * 28 + t * (1.2 + h3 * 0.8), 28);
+    const z = cz + wrapM(h3 * 44 + t * 0.3 - cz, 44) - 22;
+    Sprites.add(x, y, z, 0.07 + h3 * 0.06, 1, 1, 1, 1, 0.75);
+  }
+  // 風のつり橋：強い風の雪けむり
+  if (S2.gust !== 0) {
+    const k = S2.gust < 0 ? 0.25 : S2.gust;
+    for (let i = 0; i < 46; i++) {
+      const h1 = fract(Math.sin(i * 3.17) * 9182.7), h2 = fract(Math.sin(i * 7.71) * 5531.3);
+      const x = -9 + wrapM(h1 * 18 + t * (S2.gust < 0 ? 5 : 15), 18);
+      const z = -24 - h2 * 30, y = -0.3 + fract(h1 * 7.3) * 2.6;
+      Sprites.add(x, y, z, 0.35 + h2 * 0.3, 0, 1, 1, 1, 0.35 * k);
+    }
+  }
+}
+const ICICLE_WARN = [1, 0.75, 0.75];
+const fract = (v) => v - Math.floor(v);
+const wrapM = (v, m) => ((v % m) + m) % m;
+
+// ステージ2の新しいモデル（全ステージで共通に使える）
+function buildStage2Models() {
+  // ---- ゆきだるん：雪玉2段の からだ、青い毛糸のぼうし、えだの手 ----
+  {
+    const g = new Geo();
+    const snow = (p) => mixc(hex(0xdfe6f6), hex(0xffffff), clamp(p[1] * 0.6 + 0.6, 0, 1));
+    g.sphere(T(0, 0.62, 0, 0.68, 0.62, 0.68), snow, 16, 10);
+    g.sphere(T(0, 1.5, 0, 0.47, 0.44, 0.47), snow, 14, 9);
+    for (const sx of [-1, 1]) {
+      g.sphere(T(sx * 0.17, 1.6, 0.39, 0.07, 0.09, 0.05), COL.eye, 8, 5);         // 目
+      g.box(T(sx * 0.18, 1.74, 0.38, 0.16, 0.035, 0.03, 0, 0, sx * -0.35), COL.eye); // おこりまゆ
+      g.sphere(T(sx * 0.3, 1.43, 0.32, 0.08, 0.05, 0.03), hex(0xffa0b0), 6, 4);   // ほっぺ
+      // えだの手
+      const arm = T(sx * 0.6, 0.95, 0, 1, 1, 1, 0, 0, sx * -1.0);
+      M4.scale(arm, 0.05, 0.55, 0.05);
+      g.cyl(arm, hex(0x6b4a33), 5);
+      g.cyl(T(sx * 0.98, 1.2, 0, 0.035, 0.22, 0.035, 0, 0, sx * -0.3), hex(0x6b4a33), 4);
+    }
+    g.box(T(0, 1.4, 0.44, 0.16, 0.04, 0.03), COL.eye); // への字の口
+    g.cyl(T(0, 1.52, 0.42, 0.06, 0.2, 0.06, 0, Math.PI / 2), hex(0x9d8cd8), 6, { top: 0 }); // 紫の石の はな
+    // ぼうし（青い毛糸）とぽんぽん
+    g.cyl(T(0, 1.78, 0, 0.42, 0.36, 0.42), (p) => (p[1] < 0.3 ? hex(0x2f7fc4) : hex(0x4fa8e6)), 14, { top: 0.55 });
+    g.sphere(T(0, 2.2, 0, 0.14, 0.14, 0.14), COL.white, 8, 6);
+    // ボタンの石
+    for (let i = 0; i < 2; i++) g.sphere(T(0, 0.55 + i * 0.3, 0.66 - i * 0.04, 0.07, 0.07, 0.04), hex(0x4a4566), 6, 4);
+    Models.snowman = g.mesh();
+  }
+  Models.snowball = new Geo().sphere(T(0, 0, 0, 0.28, 0.28, 0.28), (p) => mixc(hex(0xd8e2f4), COL.white, p[1] * 0.5 + 0.5), 10, 6, { flat: true }).mesh();
+  // つらら（根元が原点、下へのびる）
+  Models.icicle = new Geo().cyl(T(0, -1.25, 0, 0.3, 1.25, 0.3), (p) => mixc(hex(0xe8f8ff), hex(0x8fd3ff), clamp(-p[1], 0, 1)), 7, { bottom: 0, flat: true }).cyl(T(0, -0.1, 0, 0.42, 0.18, 0.42), hex(0xf3f7ff), 7).mesh();
+  // 氷の結晶（ほらあな・雪山の飾り）
+  {
+    const g = new Geo();
+    const c = (p) => mixc(hex(0x7fd0ff), hex(0xe8fbff), clamp(p[1] * 0.7, 0, 1));
+    g.cyl(T(0, 0, 0, 0.3, 1.3, 0.3), c, 6, { top: 0, flat: true });
+    g.cyl(T(0.32, 0, 0.1, 0.2, 0.85, 0.2, 0, 0, -0.45), c, 6, { top: 0, flat: true });
+    g.cyl(T(-0.28, 0, -0.12, 0.22, 0.95, 0.22, 0, 0.3, 0.4), c, 6, { top: 0, flat: true });
+    g.cyl(T(0.05, 0, -0.32, 0.16, 0.6, 0.16, 0, -0.5, 0), c, 6, { top: 0, flat: true });
+    Models.crystal = g.mesh();
   }
 }
 
@@ -4749,12 +5420,12 @@ function updateEntities(dt) {
       for (const l of sg.lines) Game.toast(l, 4.5);
     } else if (!sg.armed && d > 6) sg.armed = true;
   }
-  // 西の高台：印のついた敵を全部たおすと種
-  if (!Level.arenaDone) {
+  // 印のついた敵（arena）を全部たおすと種（どの種かはステージが Level.arenaSeed で決める）
+  if (!Level.arenaDone && Level.arenaSeed) {
     const arena = Level.enemies.filter((e) => e.arena);
     if (arena.length && arena.every((e) => !e.alive)) {
       Level.arenaDone = true;
-      revealSeedMsg(3, '高台の敵を ぜんぶ たおした！ ひかりの種が あらわれた！');
+      revealSeedMsg(Level.arenaSeed.id, Level.arenaSeed.msg);
     }
   }
 
@@ -4769,7 +5440,8 @@ function updateEntities(dt) {
         Game.acorns++;
         Sound.play('acorn');
         Fx.burst(a.x, a.y, a.z, [1, 0.85, 0.4], 6, 3);
-        if (Game.acorns === 50) Game.revealSeed(5);
+        const as = Level.acornSeed;
+        if (as && Game.acorns === as.n) revealSeedMsg(as.id, as.msg);
       }
     }
   }
@@ -4805,6 +5477,7 @@ function updateEntities(dt) {
     if (e.type === 'blob') updateBlob(e, dt);
     else if (e.type === 'spiky') updateSpiky(e, dt);
     else if (e.type === 'hopper') updateHopper(e, dt);
+    else if (e.type === 'snowman') updateSnowman(e, dt);
   }
 }
 
@@ -4931,7 +5604,7 @@ function killEnemy(e, how) {
   Level.acornTotal++;
   if (e.arena) {
     const left = Level.enemies.filter((q) => q.arena && q.alive).length;
-    if (left > 0) Game.toast(`高台の敵 のこり ${left} ひき`, 2);
+    if (left > 0) Game.toast(`${Level.arenaName || '高台の敵'} のこり ${left} ひき`, 2);
   }
 }
 
@@ -4954,14 +5627,17 @@ function updateSpiky(e, dt) {
 // ヒップドロップの衝撃：近くの敵を倒す
 function poundShock(x, y, z) {
   poundStakes(x, y, z);
+  for (const f of Level.poundHooks) f(x, y, z);
   for (const e of Level.enemies) {
     if (!e.alive || e.type === 'spiky') continue;
     if (Math.hypot(e.x - x, e.z - z) < 2.6 && Math.abs(e.y - y) < 1) killEnemy(e, 'pound');
   }
 }
 
+const OLD_SEED_TINT = [0.75, 0.85, 1];
 function drawEntities() {
   const t = Game.time;
+  const tint = Level.tint;
   for (const a of Level.acorns) {
     if (a.got) continue;
     drawMesh(Models.acorn, T(a.x, a.y + Math.sin(a.t) * 0.12, a.z, 1.2, 1.2, 1.2, a.t * 1.3));
@@ -4975,32 +5651,36 @@ function drawEntities() {
   for (const s of Level.seeds) {
     if (s.got || s.hidden) continue;
     const pulse = 1 + Math.sin(s.t * 4) * 0.06;
-    drawMesh(Models.seed, T(s.x, s.y + Math.sin(s.t * 2) * 0.2, s.z, pulse, pulse, pulse, s.t * 1.5), WHITE, 0.55);
+    // 前のプレイで取ったことがある種は半透明
+    if (s.old) drawMesh(Models.seed, T(s.x, s.y + Math.sin(s.t * 2) * 0.2, s.z, pulse, pulse, pulse, s.t * 1.5), OLD_SEED_TINT, 0.35, 0.45);
+    else drawMesh(Models.seed, T(s.x, s.y + Math.sin(s.t * 2) * 0.2, s.z, pulse, pulse, pulse, s.t * 1.5), WHITE, 0.55);
     drawShadow(s.x, s.y, s.z, 0.7, 0.25);
   }
   for (const e of Level.enemies) {
     if (!e.alive) {
       if (e.deadT < 0.3 && e.type !== 'spiky') {
         const k = 1 - e.deadT / 0.3;
-        drawMesh(e.type === 'blob' ? Models.blob : Models.hopper, T(e.x, e.y, e.z, 1 + (1 - k) * 0.6, k * 0.3 + 0.05, 1 + (1 - k) * 0.6, e.yaw));
+        const dm = e.type === 'blob' ? Models.blob : e.type === 'snowman' ? Models.snowman : Models.hopper;
+        drawMesh(dm, T(e.x, e.y, e.z, 1 + (1 - k) * 0.6, k * 0.3 + 0.05, 1 + (1 - k) * 0.6, e.yaw), tint);
       }
       continue;
     }
     if (e.type === 'hopper') {
       const sq = e.squish;
-      drawMesh(Models.hopper, T(e.x, e.y, e.z, 1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq), e.yaw));
+      drawMesh(Models.hopper, T(e.x, e.y, e.z, 1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq), e.yaw), tint);
       drawShadow(e.x, e.y + 0.1, e.z, 0.6);
       continue;
     }
+    if (e.type === 'snowman') { drawSnowman(e, tint); continue; }
     if (e.type === 'blob') {
       const wob = 1 + Math.sin(e.t * (e.state === 'chase' ? 14 : 7)) * 0.06;
       const sq = e.squish * wob;
-      drawMesh(Models.blob, T(e.x, e.y, e.z, 1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq), e.yaw));
+      drawMesh(Models.blob, T(e.x, e.y, e.z, 1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq), e.yaw), tint);
       drawShadow(e.x, e.y + 0.1, e.z, 0.7);
     } else {
       const m = T(e.x, e.y, e.z, 1, 1, 1, e.yaw);
       M4.rotX(m, e.rot);
-      drawMesh(Models.spiky, m);
+      drawMesh(Models.spiky, m, tint);
       drawShadow(e.x, e.y - 0.6, e.z, 0.75);
     }
   }
@@ -5011,8 +5691,54 @@ function drawEntities() {
 // ゲーム全体の進行・画面表示・メインループ
 const hud = hudCanvas.getContext('2d');
 
+// ---------------- セーブ（localStorage）----------------
+// koron-save = { v:1, stages: { [ステージid]: { seeds:[取った種のid], best:ベストタイム(秒), done:全部集めたか } } }
+const Save = {
+  KEY: 'koron-save',
+  data: { v: 1, stages: {} },
+  load() {
+    let d = null;
+    try { d = JSON.parse(localStorage.getItem(this.KEY) || 'null'); } catch (e) { d = null; }
+    if (!d || typeof d !== 'object' || !d.stages || typeof d.stages !== 'object') d = { v: 1, stages: {} };
+    // 前の版のベストタイム（ステージが1つだったころ）を引きつぐ
+    const old = Number(localStorage.getItem('koron-best') || 0);
+    if (old > 0) {
+      const s0 = d.stages[0] || (d.stages[0] = { seeds: [], best: 0, done: false });
+      if (!s0.best) s0.best = old;
+    }
+    this.data = d;
+  },
+  write() {
+    try { localStorage.setItem(this.KEY, JSON.stringify(this.data)); localStorage.removeItem('koron-best'); } catch (e) { /* 保存できない環境でも遊べるように */ }
+  },
+  st(id) {
+    const ss = this.data.stages;
+    if (!ss[id] || !Array.isArray(ss[id].seeds)) ss[id] = { seeds: [], best: 0, done: false };
+    return ss[id];
+  },
+  has(id, seedId) { return this.st(id).seeds.includes(seedId); },
+  count(id) { return this.st(id).seeds.length; },
+  addSeed(id, seedId) {
+    const s = this.st(id);
+    if (s.seeds.includes(seedId)) return false;
+    s.seeds.push(seedId); this.write();
+    return true;
+  },
+  // 開く条件（unlock: {stage, seeds}）をみたしているか
+  unlocked(id) {
+    const st = STAGES[id];
+    if (!st || !st.unlock) return true;
+    return this.count(st.unlock.stage) >= st.unlock.seeds;
+  },
+  clear() {
+    this.data = { v: 1, stages: {} };
+    try { localStorage.removeItem(this.KEY); localStorage.removeItem('koron-best'); } catch (e) { /* なにもしない */ }
+  },
+};
+Save.load();
+
 const Game = {
-  state: 'title',   // title | play | pause | seed | dead | clear
+  state: 'title',   // title | select | erase | play | pause | seed | dead | clear
   time: 0,          // 経過時間（演出用）
   playTime: 0,      // プレイ時間
   stT: 0,
@@ -5021,7 +5747,11 @@ const Game = {
   shake: 0,
   toasts: [],
   lastSeed: null,
-  best: Number(localStorage.getItem('koron-best') || 0),
+  stageId: 0,       // 遊んでいる（選んでいる）ステージ
+  lastOld: false,   // さっき取った種が「とったことがある」種か
+  fullRun: false,   // 1回のプレイで全部集めたか（クリア画面用）
+  titleMsg: '', titleMsgT: 0,
+  selShake: 0,
   fps: 60,
   cpuMs: 0,         // 1フレームの計算時間（描画をのぞく）
   menuSel: 0,
@@ -5032,8 +5762,10 @@ const Game = {
   newRecord: false,
   portraitHintT: 0,
 
-  newGame() {
-    buildLevelState();
+  newGame(id) {
+    if (id !== undefined) this.stageId = id;
+    buildLevelState(this.stageId);
+    if (typeof Music !== 'undefined' && Music.setStyle) Music.setStyle(Level.stage.music);
     this.acorns = 0; this.seeds = 0; this.playTime = 0; this.shownAcorns = 0;
     P.hp = P.maxHp; this.shownHp = P.maxHp;
     const s = Level.start;
@@ -5041,7 +5773,9 @@ const Game = {
     camReset();
     this.state = 'play'; this.stT = 0; this.help = false;
     this.toasts.length = 0;
-    this.toast('ひかりの種を ' + Level.seedTotal + ' こ 集めよう！', 4);
+    this.toast(Level.stage.name + '　ひかりの種を ' + Level.seedTotal + ' こ 集めよう！', 4);
+    const had = Save.count(this.stageId);
+    if (had > 0 && had < Level.seedTotal) this.toast('うすい種は とったことがある種（のこり ' + (Level.seedTotal - had) + ' こ）', 4);
     this.portraitHintT = 6;
     Sound.setDuck(1);
   },
@@ -5052,6 +5786,13 @@ const Game = {
   getSeed(s) {
     this.seeds++;
     this.lastSeed = s;
+    // その場で保存する。前に取ったことがある種は「とったことがある」扱い
+    this.lastOld = !!s.old;
+    const sid = this.stageId;
+    const wasDone = Save.st(sid).done;
+    Save.addSeed(sid, s.id);
+    const fullRun = this.seeds >= Level.seedTotal;                  // 1回のプレイで全部集めた
+    const firstAll = !wasDone && Save.count(sid) >= Level.seedTotal; // これまでの分とあわせて はじめて全部そろった
     Sound.play('seed');
     Sound.setDuck(0.15);
     Fx.burst(s.x, s.y + 0.7, s.z, [0.7, 1, 0.95], 30, 8);
@@ -5060,26 +5801,23 @@ const Game = {
     P.vy = 0; P.speed = 0; P.vx = P.vz = 0;
     P.flip = 0; P.sideFlip = false; P.dive = false; P.longJump = false;
     P.skidT = 0; P.slideT = 0; P.kickT = 0; P.wallSlide = false; P.wall = null; P.punchN = 0;
-    if (this.seeds >= Level.seedTotal) {
+    if (fullRun || firstAll) {
       this.state = 'clear'; this.stT = 0; this.menuSel = 0;
       P.state = 'win'; P.vx = P.vz = 0;
       setTimeout(() => Sound.play('clear'), 600);
-      const t = this.playTime;
-      if (!this.best || t < this.best) { this.best = t; localStorage.setItem('koron-best', String(t)); this.newRecord = true; }
+      const t = this.playTime, sv = Save.st(sid);
+      sv.done = true;
+      this.fullRun = fullRun;
+      // ベストタイムは「1回のプレイで全部集めた」ときのタイム
+      if (fullRun && (!sv.best || t < sv.best)) { sv.best = t; this.newRecord = true; }
       else this.newRecord = false;
+      Save.write();
     } else {
       this.state = 'seed'; this.stT = 0;
       P.state = 'win';
     }
   },
-  revealSeed(id) {
-    const s = Level.seeds.find((q) => q.id === id);
-    if (!s || !s.hidden) return;
-    s.hidden = false;
-    Sound.play('seed');
-    Fx.burst(s.x, s.y + 0.7, s.z, [0.7, 1, 0.95], 24, 6);
-    this.toast('どんぐり50こ！ スタート地点に ひかりの種が あらわれた！', 4);
-  },
+  revealSeed(id) { revealSeedMsg(id, 'ひかりの種が あらわれた！'); },
   onFall() {
     if (P.state === 'dead') return;
     Sound.play('fall');
@@ -5095,9 +5833,10 @@ const Game = {
   onPound(x, y, z) { poundShock(x, y, z); },
 };
 
-// 敵やアイテムを初期状態に戻す（ステージを作り直す）
-function buildLevelState() {
-  buildLevel();
+// 敵やアイテムを初期状態に戻す（ステージを作り直す）。取ったことがある種には印をつける
+function buildLevelState(id) {
+  buildLevel(id === undefined ? Game.stageId : id);
+  for (const s of Level.seeds) s.old = Save.has(Level.stageId, s.id);
   Fx.list.length = 0; // 前のプレイの粒が止まったまま残らないように
 }
 
@@ -5112,6 +5851,11 @@ const MENUS = {
   title: [
     { id: 'start', label: () => 'はじめる', big: true },
     { id: 'help', label: () => 'あそびかた' },
+    { id: 'erase', label: () => 'きろくを けす' },
+  ],
+  erase: [
+    { id: 'no', label: () => 'けさない', big: true },
+    { id: 'yes', label: () => 'けす（もとに もどせません）' },
   ],
   pause: [
     { id: 'resume', label: () => 'つづける', big: true },
@@ -5120,14 +5864,17 @@ const MENUS = {
     { id: 'bgm', label: () => 'BGM：' + onOff(Sound.bgmOn) },
     { id: 'quality', label: () => 'がしつ：' + Perf.label() },
     { id: 'help', label: () => 'そうさ説明' },
+    { id: 'select', label: () => 'ステージを えらぶ' },
     { id: 'title', label: () => 'タイトルへ' },
   ],
   dead: [
     { id: 'retry', label: () => 'スタート地点から つづける', big: true },
+    { id: 'select', label: () => 'ステージを えらぶ' },
     { id: 'title', label: () => 'タイトルへ' },
   ],
   clear: [
     { id: 'again', label: () => 'もういちど あそぶ', big: true },
+    { id: 'select', label: () => 'ステージを えらぶ' },
     { id: 'title', label: () => 'タイトルへ' },
   ],
 };
@@ -5158,8 +5905,21 @@ function menuInput(items) {
 function goTitle() {
   Cam.override = null;
   Game.state = 'title'; Game.stT = 0; Game.menuSel = 0; Game.help = false;
-  buildLevelState();
+  showStage(0);
   Sound.setDuck(1);
+}
+// ステージ選びの画面へ。sel: はじめに選んでおくステージ
+function goSelect(sel) {
+  Cam.override = null;
+  Game.state = 'select'; Game.stT = 0; Game.help = false;
+  Game.menuSel = clamp(sel === undefined ? Game.stageId : sel, 0, STAGES.length - 1);
+  showStage(Game.menuSel);
+  Sound.setDuck(1);
+}
+// 背景にステージを出す（空の色・BGM の調も切りかえる）。敵やアイテムも初めの状態に戻す
+function showStage(id) {
+  buildLevelState(id);
+  if (typeof Music !== 'undefined' && Music.setStyle) Music.setStyle(Level.stage.music);
 }
 
 function respawnAtStart() {
@@ -5196,15 +5956,41 @@ function update(dt) {
     if (Game.state === 'title') { titleCamera(dt); updateLevel(dt); }
     return;
   }
+  Game.titleMsgT = Math.max(0, Game.titleMsgT - dt);
+  Game.selShake = Math.max(0, Game.selShake - dt);
 
   if (Game.state === 'title') {
     titleCamera(dt);
     updateLevel(dt);
     if (Game.stT > 0.3) {
       const id = menuInput(MENUS.title);
-      if (id === 'start') Game.newGame();
+      if (id === 'start') goSelect();
       else if (id === 'help') Game.help = true;
+      else if (id === 'erase') { Game.state = 'erase'; Game.stT = 0; Game.menuSel = 0; }
     }
+    return;
+  }
+  if (Game.state === 'erase') {
+    // セーブを消す前の確認（「けさない」が先に選ばれている）
+    titleCamera(dt);
+    updateLevel(dt);
+    if (Input.backP) { Game.state = 'title'; Game.menuSel = 2; Sound.play('cursor'); return; }
+    if (Game.stT > 0.2) {
+      const id = menuInput(MENUS.erase);
+      if (id === 'yes') {
+        Save.clear();
+        Game.stageId = 0;
+        showStage(0);
+        Game.titleMsg = 'きろくを けしました'; Game.titleMsgT = 2.5;
+        Game.state = 'title'; Game.stT = 0; Game.menuSel = 0;
+      } else if (id === 'no') { Game.state = 'title'; Game.stT = 0; Game.menuSel = 2; }
+    }
+    return;
+  }
+  if (Game.state === 'select') {
+    titleCamera(dt);
+    updateLevel(dt);
+    if (Game.stT > 0.2) updateSelect();
     return;
   }
   if (Game.state === 'pause') {
@@ -5216,6 +6002,7 @@ function update(dt) {
     else if (id === 'bgm') Sound.setBgm(!Sound.bgmOn);
     else if (id === 'quality') Perf.cycle();
     else if (id === 'help') Game.help = true;
+    else if (id === 'select') goSelect(Game.stageId);
     else if (id === 'title') goTitle();
     return;
   }
@@ -5249,17 +6036,20 @@ function update(dt) {
       P.stateT = 0;
       Game.state = 'play';
       Sound.setDuck(1);
-      Game.toast(`ひかりの種 ${Game.seeds} / ${Level.seedTotal}`, 2.5);
+      const have = Save.count(Game.stageId);
+      Game.toast(Game.lastOld ? `とったことがある種（これまでに ${have} / ${Level.seedTotal}）` : `ひかりの種 ${have} / ${Level.seedTotal}`, 2.5);
     }
     if (Game.state === 'clear' && Game.stT > 3) {
       const id = menuInput(MENUS.clear);
       if (id === 'again') Game.newGame();
+      else if (id === 'select') goSelect(Game.stageId);
       else if (id === 'title') goTitle();
     }
   }
   if (Game.state === 'dead' && Game.stT > 1.6) {
     const id = menuInput(MENUS.dead);
     if (id === 'retry') respawnAtStart(); // その場の進み具合は残して、スタート地点から再開
+    else if (id === 'select') goSelect(Game.stageId);
     else if (id === 'title') goTitle();
   }
   Fx.update(dt);
@@ -5267,10 +6057,40 @@ function update(dt) {
 
 function titleCamera(dt) {
   const a = Game.time * 0.08;
+  const tc = (Level.stage && Level.stage.titleCam) || { r: 46, y: 22, tx: 0, ty: 4, tz: -4 };
   Cam.override = null;
-  Cam.eye[0] = Math.sin(a) * 46; Cam.eye[1] = 22 + Math.sin(a * 0.7) * 4; Cam.eye[2] = Math.cos(a) * 46;
-  Cam.target[0] = 0; Cam.target[1] = 4; Cam.target[2] = -4;
+  Cam.eye[0] = tc.tx + Math.sin(a) * tc.r; Cam.eye[1] = tc.y + Math.sin(a * 0.7) * 4; Cam.eye[2] = tc.tz + Math.cos(a) * tc.r;
+  Cam.target[0] = tc.tx; Cam.target[1] = tc.ty; Cam.target[2] = tc.tz;
   void dt;
+}
+
+// ---------------- ステージ選び ----------------
+// 項目：ステージ 0..n-1、そのあと「もどる」。←→↑↓で えらぶ
+function updateSelect() {
+  const n = STAGES.length + 1;
+  let sel = Game.menuSel;
+  const prev = sel;
+  if (Input.leftP || Input.upP) sel = (sel + n - 1) % n;
+  if (Input.rightP || Input.downP) sel = (sel + 1) % n;
+  let pick = null;
+  if (Input.tapP) {
+    for (let i = 0; i < n; i++) {
+      const r = menuRects[i];
+      if (r.on && Input.tapX >= r.x && Input.tapX <= r.x + r.w && Input.tapY >= r.y && Input.tapY <= r.y + r.h) { sel = i; pick = i; }
+    }
+  }
+  if (Input.okP) pick = sel;
+  if (sel !== prev) {
+    if (pick === null) Sound.play('cursor');
+    Game.menuSel = sel;
+    if (sel < STAGES.length) showStage(sel);
+  }
+  if (Input.backP) { Sound.play('cursor'); goTitle(); return; }
+  if (pick === null) return;
+  if (pick >= STAGES.length) { Sound.play('select'); goTitle(); return; }
+  if (!Save.unlocked(pick)) { Game.selShake = 0.4; Sound.play('hurt'); return; }
+  Sound.play('select');
+  Game.newGame(pick);
 }
 
 // ---------------- 描画 ----------------
@@ -5478,7 +6298,8 @@ function drawHud() {
     return;
   }
 
-  if (Game.state === 'title') { drawTitle(W, H, fs, small); if (Game.help) drawHelp(W, H); return; }
+  if (Game.state === 'title' || Game.state === 'erase') { drawTitle(W, H, fs, small); if (Game.help) drawHelp(W, H); return; }
+  if (Game.state === 'select') { drawSelect(W, H, fs, small); return; }
 
   // ---- 体力 ----
   const L = S.l + 12, T0 = S.t + 10;
@@ -5504,7 +6325,15 @@ function drawHud() {
   const seedY = portrait ? T0 + hs + 22 + hs + 22 : T0;
   const seedX = portrait ? L : W / 2 - sw / 2;
   panel(seedX, seedY, sw, hs + 14, (hs + 14) / 2);
-  for (let i = 0; i < n; i++) drawSeedIcon(seedX + 22 + i * 26, seedY + (hs + 14) / 2, 22, i < Game.seeds, true);
+  // 明るい：このプレイで取った／うすい：前に取ったことがある／から：まだ
+  let oldN = 0;
+  for (const q of Level.seeds) if (q.old && !q.got) oldN++;
+  for (let i = 0; i < n; i++) {
+    const x = seedX + 22 + i * 26, y = seedY + (hs + 14) / 2;
+    if (i < Game.seeds) drawSeedIcon(x, y, 22, true, true);
+    else if (i < Game.seeds + oldN) { hud.globalAlpha = 0.45; drawSeedIcon(x, y, 22, true, false); hud.globalAlpha = 1; }
+    else drawSeedIcon(x, y, 22, false, false);
+  }
   // ---- タイム ----
   const touchUI = Input.touchMode && (Game.state === 'play' || Game.state === 'pause');
   const tx = touchUI ? (Input.btns.camera ? Input.btns.camera.x - 32 : W - 130) : W - S.r - 14;
@@ -5581,10 +6410,13 @@ function drawHud() {
 // 集めた種の一覧。compact なら 1 行にまとめる
 function drawProgress(cx, y, fs, compact) {
   const left = Level.seeds.filter((s) => !s.got).length;
+  const have = Save.count(Game.stageId);
   if (compact) {
-    txt(`ひかりの種 ${Game.seeds} / ${Level.seedTotal}　どんぐり ${Game.acorns}`, cx, y, fs, '#9cfff0', 'center');
+    txt(`ひかりの種 ${Game.seeds} / ${Level.seedTotal}（これまで ${have}）　どんぐり ${Game.acorns}`, cx, y, fs, '#9cfff0', 'center');
     return y + fs + 8;
   }
+  txt(Level.stage.name + '　これまでに ' + have + ' / ' + Level.seedTotal, cx, y, fs * 0.8, '#ffe9a8', 'center');
+  y += fs + 6;
   let yy = y;
   // 画面の高さが足りないときは種の名前を省く
   const got = Level.seeds.length - left;
@@ -5628,9 +6460,109 @@ function drawTitle(W, H, fs, small) {
   const hint = touch ? 'ボタンをタップしてね' : 'Enter / スペースで決定　↑↓で えらぶ';
   if (Math.floor(Game.time * 1.5) % 2 === 0) txt(hint, W / 2, y + 12, fs * 0.8, '#fff', 'center');
   let by = H - Input.safe.b - 20;
-  if (Game.best) { txt('ベストクリア ' + fmtTime(Game.best), W / 2, by, fs * 0.8, '#ffe9a8', 'center'); by -= fs + 6; }
+  // 全ステージでとった種の数
+  let got = 0;
+  for (const st of STAGES) got += Save.count(st.id);
+  if (got) { txt('あつめた ひかりの種 ' + got + ' こ', W / 2, by, fs * 0.8, '#ffe9a8', 'center'); by -= fs + 6; }
   if (touch && portrait) txt('スマホは よこむきが おすすめ', W / 2, by, fs * 0.75, '#fff', 'center');
+  if (Game.titleMsgT > 0) {
+    hud.globalAlpha = Math.min(1, Game.titleMsgT * 2);
+    panel(W / 2 - 120, y + 30, 240, 36, 18, 'rgba(255,255,255,.9)', null);
+    txt(Game.titleMsg, W / 2, y + 49, fs * 0.85, '#2c3e70', 'center', null);
+    hud.globalAlpha = 1;
+  }
+  if (Game.state === 'erase') drawEraseConfirm(W, H, fs);
   void small;
+}
+
+// セーブを消す前の確認
+function drawEraseConfirm(W, H, fs) {
+  hud.fillStyle = 'rgba(20,30,60,.6)';
+  hud.fillRect(0, 0, W, H);
+  const pw = Math.min(W - 30, 420), ph = Math.min(H - 30, 250);
+  const px = (W - pw) / 2, py = (H - ph) / 2;
+  panel(px, py, pw, ph, 18, 'rgba(255,252,240,.97)', '#ff8a8a');
+  txt('きろくを けしますか？', W / 2, py + 30, fs + 2, '#e04a5a', 'center', '#fff');
+  txtFit('とった ひかりの種と ベストタイムが ぜんぶ きえます', W / 2, py + 62, fs * 0.8, pw - 30, '#2c3e70', 'center', null);
+  drawMenu(MENUS.erase, W / 2, py + 86, pw, H);
+}
+
+// ステージ選び：カードを横（せまい縦画面では縦）にならべる
+function drawSelect(W, H, fs, small) {
+  const S = Input.safe;
+  const g = hud.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, 'rgba(20,30,70,.15)');
+  g.addColorStop(1, 'rgba(20,30,70,.5)');
+  hud.fillStyle = g; hud.fillRect(0, 0, W, H);
+  txt('ステージを えらぼう', W / 2, S.t + (small ? 26 : 40), small ? 22 : 30, '#ffd166', 'center');
+  for (let i = 0; i < menuRects.length; i++) menuRects[i].on = false;
+  const n = STAGES.length;
+  const portrait = H > W * 1.1;
+  const gap = small ? 10 : 18;
+  const top = S.t + (small ? 48 : 72);
+  const backH = small ? 38 : 44;
+  const availH = H - top - S.b - backH - (small ? 40 : 56);
+  let cw, ch;
+  if (portrait) { cw = Math.min(W - S.l - S.r - 30, 380); ch = clamp((availH - gap * (n - 1)) / n, 92, 170); }
+  else { cw = Math.min((W - S.l - S.r - 40 - gap * (n - 1)) / n, 300); ch = clamp(availH, 120, small ? 170 : 200); }
+  const totalW = portrait ? cw : cw * n + gap * (n - 1);
+  const x0 = W / 2 - totalW / 2;
+  for (let i = 0; i < n; i++) {
+    const st = STAGES[i];
+    const x = portrait ? x0 : x0 + i * (cw + gap);
+    const y = portrait ? top + i * (ch + gap) : top;
+    const sel = Game.menuSel === i;
+    const open = Save.unlocked(i);
+    const sv = Save.st(i);
+    const shake = sel && Game.selShake > 0 ? Math.sin(Game.selShake * 60) * 6 * Game.selShake / 0.4 : 0;
+    const pop = sel ? 1 + Math.sin(Game.time * 5) * 0.01 : 1;
+    hud.save();
+    hud.translate(x + cw / 2 + shake, y + ch / 2); hud.scale(pop, pop); hud.translate(-(x + cw / 2), -(y + ch / 2));
+    panel(x, y, cw, ch, 16, open ? (sel ? 'rgba(255,250,232,.96)' : 'rgba(255,255,255,.82)') : 'rgba(70,80,110,.82)', sel ? '#ffd166' : 'rgba(255,255,255,.6)');
+    if (sel) { hud.lineWidth = 4; hud.strokeStyle = '#ffd166'; rrect(x - 3, y - 3, cw + 6, ch + 6, 18); hud.stroke(); }
+    // 色の帯
+    hud.fillStyle = open ? st.color : '#8890a8';
+    rrect(x + 10, y + 10, cw - 20, small ? 6 : 8, 4); hud.fill();
+    const lh = clamp(ch / 6, 15, 30);
+    let yy = y + 14 + lh * 0.9;
+    txtFit((i + 1) + '. ' + st.name, x + cw / 2, yy, small ? 18 : 22, cw - 20, open ? '#2c3e70' : '#fff', 'center', null);
+    yy += lh * 0.95;
+    if (open) {
+      txtFit(st.sub || '', x + cw / 2, yy, small ? 12 : 14, cw - 20, '#6a7aa0', 'center', null);
+      yy += lh;
+      const total = st.seedTotal || 0;
+      const got = sv.seeds.length;
+      // 種のアイコン
+      const iconS = clamp((cw - 30) / Math.max(total, 1), 12, 22);
+      const ix0 = x + cw / 2 - (total - 1) * iconS / 2;
+      for (let k = 0; k < total; k++) drawSeedIcon(ix0 + k * iconS, yy, iconS * 0.85, k < got, false);
+      yy += lh * 0.95;
+      txtFit('ひかりの種 ' + got + ' / ' + total + (sv.done ? '　クリア！' : ''), x + cw / 2, yy, small ? 14 : 16, cw - 20, sv.done ? '#e07a00' : '#2c3e70', 'center', null);
+      yy += lh * 0.85;
+      txtFit('ベスト ' + (sv.best ? fmtTime(sv.best) : '--:--.--'), x + cw / 2, yy, small ? 13 : 15, cw - 20, '#7a5230', 'center', null);
+    } else {
+      yy += lh * 0.4;
+      txt('？', x + cw / 2, yy + lh * 0.3, small ? 28 : 38, '#fff', 'center', 'rgba(40,50,90,.9)');
+      yy += lh * 1.4;
+      const u = st.unlock, need = STAGES[u.stage] ? STAGES[u.stage].name : '';
+      txtFit(need + 'で', x + cw / 2, yy, small ? 13 : 15, cw - 20, '#ffe9a8', 'center', null);
+      yy += lh * 0.8;
+      txtFit('ひかりの種を ' + u.seeds + 'こ 集めると ひらく（いま ' + Save.count(u.stage) + 'こ）', x + cw / 2, yy, small ? 12 : 14, cw - 20, '#ffe9a8', 'center', null);
+    }
+    hud.restore();
+    const r = menuRects[i];
+    r.x = x; r.y = y; r.w = cw; r.h = ch; r.on = true;
+  }
+  // もどる
+  const by = portrait ? top + n * (ch + gap) : top + ch + gap + 6;
+  const bw = 180, bx = W / 2 - bw / 2;
+  const selB = Game.menuSel === n;
+  panel(bx, by, bw, backH, backH / 2, selB ? 'rgba(255,209,102,.95)' : 'rgba(255,255,255,.88)', selB ? '#fff' : 'rgba(40,50,90,.35)');
+  txt('もどる', W / 2, by + backH / 2 + 1, small ? 15 : 17, selB ? '#5a3300' : '#2c3e70', 'center', null);
+  const rb = menuRects[n];
+  rb.x = bx; rb.y = by; rb.w = bw; rb.h = backH; rb.on = true;
+  const touch = Input.touchMode || Input.hasTouch;
+  if (Math.floor(Game.time * 1.5) % 2 === 0) txt(touch ? 'カードを タップして はじめる' : '←→で えらんで Enter / スペースで はじめる', W / 2, Math.min(H - S.b - 16, by + backH + 22), fs * 0.75, '#fff', 'center');
 }
 
 function drawSeedGet(W, H, fs) {
@@ -5655,7 +6587,8 @@ function drawSeedGet(W, H, fs) {
   drawSeedIcon(W / 2, cy - 30, 54 * bounce * k, true, true);
   txt('ひかりの種 ゲット！', W / 2, cy + 40 - (1 - k) * 30, clamp(W / 16, 26, 52) * k * (t < 0.4 ? bounce : 1), '#9cfff0', 'center');
   if (t > 0.4) txt(Game.lastSeed.name, W / 2, cy + 40 + clamp(W / 16, 26, 52) * 0.75 + 6, fs, '#fff', 'center');
-  if (t > 0.6) txt(Game.seeds + ' / ' + Level.seedTotal, W / 2, cy + 40 + clamp(W / 16, 26, 52) * 0.75 + fs + 16, fs + 4, '#ffe08a', 'center');
+  const have = Save.count(Game.stageId);
+  if (t > 0.6) txt(Game.lastOld ? 'とったことがある 種（' + have + ' / ' + Level.seedTotal + '）' : have + ' / ' + Level.seedTotal, W / 2, cy + 40 + clamp(W / 16, 26, 52) * 0.75 + fs + 16, Game.lastOld ? fs : fs + 4, Game.lastOld ? '#d8e4ff' : '#ffe08a', 'center');
 }
 
 function drawClear(W, H, fs, small) {
@@ -5663,12 +6596,14 @@ function drawClear(W, H, fs, small) {
   hud.fillRect(0, 0, W, H);
   const k = Math.min(1, Game.stT * 1.5);
   const cy = H * 0.24;
-  txt('ぜんぶ 集めた！ クリア！', W / 2, cy - (1 - k) * 30, clamp(W / 16, 24, 54) * (0.6 + 0.4 * k), '#ffd166', 'center');
+  txt(Level.stage.name + ' クリア！', W / 2, cy - (1 - k) * 30, clamp(W / 16, 24, 54) * (0.6 + 0.4 * k), '#ffd166', 'center');
   if (Game.stT > 0.8) {
     const pw = Math.min(W - 40, 360), ph = small ? 96 : 120;
     panel(W / 2 - pw / 2, cy + 36, pw, ph, 16, 'rgba(255,255,255,.9)', '#ffd166');
     txt('タイム ' + fmtTime(Game.playTime), W / 2, cy + 36 + ph * 0.28, fs + 4, '#2c3e70', 'center', null);
     if (Game.newRecord) txt('ベスト更新！', W / 2, cy + 36 + ph * 0.52, fs, '#ff5577', 'center', null);
+    else if (!Game.fullRun) txtFit('1回で ぜんぶ集めると タイムが のこるよ', W / 2, cy + 36 + ph * 0.52, fs * 0.8, pw - 20, '#6a7aa0', 'center', null);
+    else { const b = Save.st(Game.stageId).best; if (b) txt('ベスト ' + fmtTime(b), W / 2, cy + 36 + ph * 0.52, fs * 0.9, '#6a7aa0', 'center', null); }
     txt('どんぐり ' + Game.acorns + ' / ' + Level.acornTotal, W / 2, cy + 36 + ph * 0.78, fs, '#7a5230', 'center', null);
     if (Game.stT > 3) drawMenu(MENUS.clear, W / 2, cy + 36 + ph + 16, W, H);
   }
@@ -5747,7 +6682,7 @@ function frame(now) {
 function boot() {
   try {
     initGL();
-    if (R.ok) { buildModels(); buildLevel(); }
+    if (R.ok) { buildModels(); buildLevelState(0); }
   } catch (e) {
     R.ok = false;
     console.error(e);
@@ -5755,7 +6690,7 @@ function boot() {
   Cam.eye[0] = 40; Cam.eye[1] = 20; Cam.eye[2] = 40;
   readSafeArea();
   // デバッグ用：KORON.step(秒) で入力を入れたまま時間を進められる（debug.manual=true のとき）
-  window.KORON = { Game, P, PL, Cam, Level, World, Input, R, Sound, Music, debug, step: stepGame, camReset, menuRects };
+  window.KORON = { Game, P, PL, Cam, Level, World, Input, R, Sound, Music, debug, step: stepGame, camReset, menuRects, Save, STAGES, goSelect, goTitle, buildLevelState };
   requestAnimationFrame(frame);
 }
 boot();

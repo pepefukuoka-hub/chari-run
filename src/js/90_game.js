@@ -1,8 +1,54 @@
 // ゲーム全体の進行・画面表示・メインループ
 const hud = hudCanvas.getContext('2d');
 
+// ---------------- セーブ（localStorage）----------------
+// koron-save = { v:1, stages: { [ステージid]: { seeds:[取った種のid], best:ベストタイム(秒), done:全部集めたか } } }
+const Save = {
+  KEY: 'koron-save',
+  data: { v: 1, stages: {} },
+  load() {
+    let d = null;
+    try { d = JSON.parse(localStorage.getItem(this.KEY) || 'null'); } catch (e) { d = null; }
+    if (!d || typeof d !== 'object' || !d.stages || typeof d.stages !== 'object') d = { v: 1, stages: {} };
+    // 前の版のベストタイム（ステージが1つだったころ）を引きつぐ
+    const old = Number(localStorage.getItem('koron-best') || 0);
+    if (old > 0) {
+      const s0 = d.stages[0] || (d.stages[0] = { seeds: [], best: 0, done: false });
+      if (!s0.best) s0.best = old;
+    }
+    this.data = d;
+  },
+  write() {
+    try { localStorage.setItem(this.KEY, JSON.stringify(this.data)); localStorage.removeItem('koron-best'); } catch (e) { /* 保存できない環境でも遊べるように */ }
+  },
+  st(id) {
+    const ss = this.data.stages;
+    if (!ss[id] || !Array.isArray(ss[id].seeds)) ss[id] = { seeds: [], best: 0, done: false };
+    return ss[id];
+  },
+  has(id, seedId) { return this.st(id).seeds.includes(seedId); },
+  count(id) { return this.st(id).seeds.length; },
+  addSeed(id, seedId) {
+    const s = this.st(id);
+    if (s.seeds.includes(seedId)) return false;
+    s.seeds.push(seedId); this.write();
+    return true;
+  },
+  // 開く条件（unlock: {stage, seeds}）をみたしているか
+  unlocked(id) {
+    const st = STAGES[id];
+    if (!st || !st.unlock) return true;
+    return this.count(st.unlock.stage) >= st.unlock.seeds;
+  },
+  clear() {
+    this.data = { v: 1, stages: {} };
+    try { localStorage.removeItem(this.KEY); localStorage.removeItem('koron-best'); } catch (e) { /* なにもしない */ }
+  },
+};
+Save.load();
+
 const Game = {
-  state: 'title',   // title | play | pause | seed | dead | clear
+  state: 'title',   // title | select | erase | play | pause | seed | dead | clear
   time: 0,          // 経過時間（演出用）
   playTime: 0,      // プレイ時間
   stT: 0,
@@ -11,7 +57,11 @@ const Game = {
   shake: 0,
   toasts: [],
   lastSeed: null,
-  best: Number(localStorage.getItem('koron-best') || 0),
+  stageId: 0,       // 遊んでいる（選んでいる）ステージ
+  lastOld: false,   // さっき取った種が「とったことがある」種か
+  fullRun: false,   // 1回のプレイで全部集めたか（クリア画面用）
+  titleMsg: '', titleMsgT: 0,
+  selShake: 0,
   fps: 60,
   cpuMs: 0,         // 1フレームの計算時間（描画をのぞく）
   menuSel: 0,
@@ -22,8 +72,10 @@ const Game = {
   newRecord: false,
   portraitHintT: 0,
 
-  newGame() {
-    buildLevelState();
+  newGame(id) {
+    if (id !== undefined) this.stageId = id;
+    buildLevelState(this.stageId);
+    if (typeof Music !== 'undefined' && Music.setStyle) Music.setStyle(Level.stage.music);
     this.acorns = 0; this.seeds = 0; this.playTime = 0; this.shownAcorns = 0;
     P.hp = P.maxHp; this.shownHp = P.maxHp;
     const s = Level.start;
@@ -31,7 +83,9 @@ const Game = {
     camReset();
     this.state = 'play'; this.stT = 0; this.help = false;
     this.toasts.length = 0;
-    this.toast('ひかりの種を ' + Level.seedTotal + ' こ 集めよう！', 4);
+    this.toast(Level.stage.name + '　ひかりの種を ' + Level.seedTotal + ' こ 集めよう！', 4);
+    const had = Save.count(this.stageId);
+    if (had > 0 && had < Level.seedTotal) this.toast('うすい種は とったことがある種（のこり ' + (Level.seedTotal - had) + ' こ）', 4);
     this.portraitHintT = 6;
     Sound.setDuck(1);
   },
@@ -42,6 +96,13 @@ const Game = {
   getSeed(s) {
     this.seeds++;
     this.lastSeed = s;
+    // その場で保存する。前に取ったことがある種は「とったことがある」扱い
+    this.lastOld = !!s.old;
+    const sid = this.stageId;
+    const wasDone = Save.st(sid).done;
+    Save.addSeed(sid, s.id);
+    const fullRun = this.seeds >= Level.seedTotal;                  // 1回のプレイで全部集めた
+    const firstAll = !wasDone && Save.count(sid) >= Level.seedTotal; // これまでの分とあわせて はじめて全部そろった
     Sound.play('seed');
     Sound.setDuck(0.15);
     Fx.burst(s.x, s.y + 0.7, s.z, [0.7, 1, 0.95], 30, 8);
@@ -50,26 +111,23 @@ const Game = {
     P.vy = 0; P.speed = 0; P.vx = P.vz = 0;
     P.flip = 0; P.sideFlip = false; P.dive = false; P.longJump = false;
     P.skidT = 0; P.slideT = 0; P.kickT = 0; P.wallSlide = false; P.wall = null; P.punchN = 0;
-    if (this.seeds >= Level.seedTotal) {
+    if (fullRun || firstAll) {
       this.state = 'clear'; this.stT = 0; this.menuSel = 0;
       P.state = 'win'; P.vx = P.vz = 0;
       setTimeout(() => Sound.play('clear'), 600);
-      const t = this.playTime;
-      if (!this.best || t < this.best) { this.best = t; localStorage.setItem('koron-best', String(t)); this.newRecord = true; }
+      const t = this.playTime, sv = Save.st(sid);
+      sv.done = true;
+      this.fullRun = fullRun;
+      // ベストタイムは「1回のプレイで全部集めた」ときのタイム
+      if (fullRun && (!sv.best || t < sv.best)) { sv.best = t; this.newRecord = true; }
       else this.newRecord = false;
+      Save.write();
     } else {
       this.state = 'seed'; this.stT = 0;
       P.state = 'win';
     }
   },
-  revealSeed(id) {
-    const s = Level.seeds.find((q) => q.id === id);
-    if (!s || !s.hidden) return;
-    s.hidden = false;
-    Sound.play('seed');
-    Fx.burst(s.x, s.y + 0.7, s.z, [0.7, 1, 0.95], 24, 6);
-    this.toast('どんぐり50こ！ スタート地点に ひかりの種が あらわれた！', 4);
-  },
+  revealSeed(id) { revealSeedMsg(id, 'ひかりの種が あらわれた！'); },
   onFall() {
     if (P.state === 'dead') return;
     Sound.play('fall');
@@ -85,9 +143,10 @@ const Game = {
   onPound(x, y, z) { poundShock(x, y, z); },
 };
 
-// 敵やアイテムを初期状態に戻す（ステージを作り直す）
-function buildLevelState() {
-  buildLevel();
+// 敵やアイテムを初期状態に戻す（ステージを作り直す）。取ったことがある種には印をつける
+function buildLevelState(id) {
+  buildLevel(id === undefined ? Game.stageId : id);
+  for (const s of Level.seeds) s.old = Save.has(Level.stageId, s.id);
   Fx.list.length = 0; // 前のプレイの粒が止まったまま残らないように
 }
 
@@ -102,6 +161,11 @@ const MENUS = {
   title: [
     { id: 'start', label: () => 'はじめる', big: true },
     { id: 'help', label: () => 'あそびかた' },
+    { id: 'erase', label: () => 'きろくを けす' },
+  ],
+  erase: [
+    { id: 'no', label: () => 'けさない', big: true },
+    { id: 'yes', label: () => 'けす（もとに もどせません）' },
   ],
   pause: [
     { id: 'resume', label: () => 'つづける', big: true },
@@ -110,14 +174,17 @@ const MENUS = {
     { id: 'bgm', label: () => 'BGM：' + onOff(Sound.bgmOn) },
     { id: 'quality', label: () => 'がしつ：' + Perf.label() },
     { id: 'help', label: () => 'そうさ説明' },
+    { id: 'select', label: () => 'ステージを えらぶ' },
     { id: 'title', label: () => 'タイトルへ' },
   ],
   dead: [
     { id: 'retry', label: () => 'スタート地点から つづける', big: true },
+    { id: 'select', label: () => 'ステージを えらぶ' },
     { id: 'title', label: () => 'タイトルへ' },
   ],
   clear: [
     { id: 'again', label: () => 'もういちど あそぶ', big: true },
+    { id: 'select', label: () => 'ステージを えらぶ' },
     { id: 'title', label: () => 'タイトルへ' },
   ],
 };
@@ -148,8 +215,21 @@ function menuInput(items) {
 function goTitle() {
   Cam.override = null;
   Game.state = 'title'; Game.stT = 0; Game.menuSel = 0; Game.help = false;
-  buildLevelState();
+  showStage(0);
   Sound.setDuck(1);
+}
+// ステージ選びの画面へ。sel: はじめに選んでおくステージ
+function goSelect(sel) {
+  Cam.override = null;
+  Game.state = 'select'; Game.stT = 0; Game.help = false;
+  Game.menuSel = clamp(sel === undefined ? Game.stageId : sel, 0, STAGES.length - 1);
+  showStage(Game.menuSel);
+  Sound.setDuck(1);
+}
+// 背景にステージを出す（空の色・BGM の調も切りかえる）。敵やアイテムも初めの状態に戻す
+function showStage(id) {
+  buildLevelState(id);
+  if (typeof Music !== 'undefined' && Music.setStyle) Music.setStyle(Level.stage.music);
 }
 
 function respawnAtStart() {
@@ -186,15 +266,41 @@ function update(dt) {
     if (Game.state === 'title') { titleCamera(dt); updateLevel(dt); }
     return;
   }
+  Game.titleMsgT = Math.max(0, Game.titleMsgT - dt);
+  Game.selShake = Math.max(0, Game.selShake - dt);
 
   if (Game.state === 'title') {
     titleCamera(dt);
     updateLevel(dt);
     if (Game.stT > 0.3) {
       const id = menuInput(MENUS.title);
-      if (id === 'start') Game.newGame();
+      if (id === 'start') goSelect();
       else if (id === 'help') Game.help = true;
+      else if (id === 'erase') { Game.state = 'erase'; Game.stT = 0; Game.menuSel = 0; }
     }
+    return;
+  }
+  if (Game.state === 'erase') {
+    // セーブを消す前の確認（「けさない」が先に選ばれている）
+    titleCamera(dt);
+    updateLevel(dt);
+    if (Input.backP) { Game.state = 'title'; Game.menuSel = 2; Sound.play('cursor'); return; }
+    if (Game.stT > 0.2) {
+      const id = menuInput(MENUS.erase);
+      if (id === 'yes') {
+        Save.clear();
+        Game.stageId = 0;
+        showStage(0);
+        Game.titleMsg = 'きろくを けしました'; Game.titleMsgT = 2.5;
+        Game.state = 'title'; Game.stT = 0; Game.menuSel = 0;
+      } else if (id === 'no') { Game.state = 'title'; Game.stT = 0; Game.menuSel = 2; }
+    }
+    return;
+  }
+  if (Game.state === 'select') {
+    titleCamera(dt);
+    updateLevel(dt);
+    if (Game.stT > 0.2) updateSelect();
     return;
   }
   if (Game.state === 'pause') {
@@ -206,6 +312,7 @@ function update(dt) {
     else if (id === 'bgm') Sound.setBgm(!Sound.bgmOn);
     else if (id === 'quality') Perf.cycle();
     else if (id === 'help') Game.help = true;
+    else if (id === 'select') goSelect(Game.stageId);
     else if (id === 'title') goTitle();
     return;
   }
@@ -239,17 +346,20 @@ function update(dt) {
       P.stateT = 0;
       Game.state = 'play';
       Sound.setDuck(1);
-      Game.toast(`ひかりの種 ${Game.seeds} / ${Level.seedTotal}`, 2.5);
+      const have = Save.count(Game.stageId);
+      Game.toast(Game.lastOld ? `とったことがある種（これまでに ${have} / ${Level.seedTotal}）` : `ひかりの種 ${have} / ${Level.seedTotal}`, 2.5);
     }
     if (Game.state === 'clear' && Game.stT > 3) {
       const id = menuInput(MENUS.clear);
       if (id === 'again') Game.newGame();
+      else if (id === 'select') goSelect(Game.stageId);
       else if (id === 'title') goTitle();
     }
   }
   if (Game.state === 'dead' && Game.stT > 1.6) {
     const id = menuInput(MENUS.dead);
     if (id === 'retry') respawnAtStart(); // その場の進み具合は残して、スタート地点から再開
+    else if (id === 'select') goSelect(Game.stageId);
     else if (id === 'title') goTitle();
   }
   Fx.update(dt);
@@ -257,10 +367,40 @@ function update(dt) {
 
 function titleCamera(dt) {
   const a = Game.time * 0.08;
+  const tc = (Level.stage && Level.stage.titleCam) || { r: 46, y: 22, tx: 0, ty: 4, tz: -4 };
   Cam.override = null;
-  Cam.eye[0] = Math.sin(a) * 46; Cam.eye[1] = 22 + Math.sin(a * 0.7) * 4; Cam.eye[2] = Math.cos(a) * 46;
-  Cam.target[0] = 0; Cam.target[1] = 4; Cam.target[2] = -4;
+  Cam.eye[0] = tc.tx + Math.sin(a) * tc.r; Cam.eye[1] = tc.y + Math.sin(a * 0.7) * 4; Cam.eye[2] = tc.tz + Math.cos(a) * tc.r;
+  Cam.target[0] = tc.tx; Cam.target[1] = tc.ty; Cam.target[2] = tc.tz;
   void dt;
+}
+
+// ---------------- ステージ選び ----------------
+// 項目：ステージ 0..n-1、そのあと「もどる」。←→↑↓で えらぶ
+function updateSelect() {
+  const n = STAGES.length + 1;
+  let sel = Game.menuSel;
+  const prev = sel;
+  if (Input.leftP || Input.upP) sel = (sel + n - 1) % n;
+  if (Input.rightP || Input.downP) sel = (sel + 1) % n;
+  let pick = null;
+  if (Input.tapP) {
+    for (let i = 0; i < n; i++) {
+      const r = menuRects[i];
+      if (r.on && Input.tapX >= r.x && Input.tapX <= r.x + r.w && Input.tapY >= r.y && Input.tapY <= r.y + r.h) { sel = i; pick = i; }
+    }
+  }
+  if (Input.okP) pick = sel;
+  if (sel !== prev) {
+    if (pick === null) Sound.play('cursor');
+    Game.menuSel = sel;
+    if (sel < STAGES.length) showStage(sel);
+  }
+  if (Input.backP) { Sound.play('cursor'); goTitle(); return; }
+  if (pick === null) return;
+  if (pick >= STAGES.length) { Sound.play('select'); goTitle(); return; }
+  if (!Save.unlocked(pick)) { Game.selShake = 0.4; Sound.play('hurt'); return; }
+  Sound.play('select');
+  Game.newGame(pick);
 }
 
 // ---------------- 描画 ----------------
@@ -468,7 +608,8 @@ function drawHud() {
     return;
   }
 
-  if (Game.state === 'title') { drawTitle(W, H, fs, small); if (Game.help) drawHelp(W, H); return; }
+  if (Game.state === 'title' || Game.state === 'erase') { drawTitle(W, H, fs, small); if (Game.help) drawHelp(W, H); return; }
+  if (Game.state === 'select') { drawSelect(W, H, fs, small); return; }
 
   // ---- 体力 ----
   const L = S.l + 12, T0 = S.t + 10;
@@ -494,7 +635,15 @@ function drawHud() {
   const seedY = portrait ? T0 + hs + 22 + hs + 22 : T0;
   const seedX = portrait ? L : W / 2 - sw / 2;
   panel(seedX, seedY, sw, hs + 14, (hs + 14) / 2);
-  for (let i = 0; i < n; i++) drawSeedIcon(seedX + 22 + i * 26, seedY + (hs + 14) / 2, 22, i < Game.seeds, true);
+  // 明るい：このプレイで取った／うすい：前に取ったことがある／から：まだ
+  let oldN = 0;
+  for (const q of Level.seeds) if (q.old && !q.got) oldN++;
+  for (let i = 0; i < n; i++) {
+    const x = seedX + 22 + i * 26, y = seedY + (hs + 14) / 2;
+    if (i < Game.seeds) drawSeedIcon(x, y, 22, true, true);
+    else if (i < Game.seeds + oldN) { hud.globalAlpha = 0.45; drawSeedIcon(x, y, 22, true, false); hud.globalAlpha = 1; }
+    else drawSeedIcon(x, y, 22, false, false);
+  }
   // ---- タイム ----
   const touchUI = Input.touchMode && (Game.state === 'play' || Game.state === 'pause');
   const tx = touchUI ? (Input.btns.camera ? Input.btns.camera.x - 32 : W - 130) : W - S.r - 14;
@@ -571,10 +720,13 @@ function drawHud() {
 // 集めた種の一覧。compact なら 1 行にまとめる
 function drawProgress(cx, y, fs, compact) {
   const left = Level.seeds.filter((s) => !s.got).length;
+  const have = Save.count(Game.stageId);
   if (compact) {
-    txt(`ひかりの種 ${Game.seeds} / ${Level.seedTotal}　どんぐり ${Game.acorns}`, cx, y, fs, '#9cfff0', 'center');
+    txt(`ひかりの種 ${Game.seeds} / ${Level.seedTotal}（これまで ${have}）　どんぐり ${Game.acorns}`, cx, y, fs, '#9cfff0', 'center');
     return y + fs + 8;
   }
+  txt(Level.stage.name + '　これまでに ' + have + ' / ' + Level.seedTotal, cx, y, fs * 0.8, '#ffe9a8', 'center');
+  y += fs + 6;
   let yy = y;
   // 画面の高さが足りないときは種の名前を省く
   const got = Level.seeds.length - left;
@@ -618,9 +770,109 @@ function drawTitle(W, H, fs, small) {
   const hint = touch ? 'ボタンをタップしてね' : 'Enter / スペースで決定　↑↓で えらぶ';
   if (Math.floor(Game.time * 1.5) % 2 === 0) txt(hint, W / 2, y + 12, fs * 0.8, '#fff', 'center');
   let by = H - Input.safe.b - 20;
-  if (Game.best) { txt('ベストクリア ' + fmtTime(Game.best), W / 2, by, fs * 0.8, '#ffe9a8', 'center'); by -= fs + 6; }
+  // 全ステージでとった種の数
+  let got = 0;
+  for (const st of STAGES) got += Save.count(st.id);
+  if (got) { txt('あつめた ひかりの種 ' + got + ' こ', W / 2, by, fs * 0.8, '#ffe9a8', 'center'); by -= fs + 6; }
   if (touch && portrait) txt('スマホは よこむきが おすすめ', W / 2, by, fs * 0.75, '#fff', 'center');
+  if (Game.titleMsgT > 0) {
+    hud.globalAlpha = Math.min(1, Game.titleMsgT * 2);
+    panel(W / 2 - 120, y + 30, 240, 36, 18, 'rgba(255,255,255,.9)', null);
+    txt(Game.titleMsg, W / 2, y + 49, fs * 0.85, '#2c3e70', 'center', null);
+    hud.globalAlpha = 1;
+  }
+  if (Game.state === 'erase') drawEraseConfirm(W, H, fs);
   void small;
+}
+
+// セーブを消す前の確認
+function drawEraseConfirm(W, H, fs) {
+  hud.fillStyle = 'rgba(20,30,60,.6)';
+  hud.fillRect(0, 0, W, H);
+  const pw = Math.min(W - 30, 420), ph = Math.min(H - 30, 250);
+  const px = (W - pw) / 2, py = (H - ph) / 2;
+  panel(px, py, pw, ph, 18, 'rgba(255,252,240,.97)', '#ff8a8a');
+  txt('きろくを けしますか？', W / 2, py + 30, fs + 2, '#e04a5a', 'center', '#fff');
+  txtFit('とった ひかりの種と ベストタイムが ぜんぶ きえます', W / 2, py + 62, fs * 0.8, pw - 30, '#2c3e70', 'center', null);
+  drawMenu(MENUS.erase, W / 2, py + 86, pw, H);
+}
+
+// ステージ選び：カードを横（せまい縦画面では縦）にならべる
+function drawSelect(W, H, fs, small) {
+  const S = Input.safe;
+  const g = hud.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, 'rgba(20,30,70,.15)');
+  g.addColorStop(1, 'rgba(20,30,70,.5)');
+  hud.fillStyle = g; hud.fillRect(0, 0, W, H);
+  txt('ステージを えらぼう', W / 2, S.t + (small ? 26 : 40), small ? 22 : 30, '#ffd166', 'center');
+  for (let i = 0; i < menuRects.length; i++) menuRects[i].on = false;
+  const n = STAGES.length;
+  const portrait = H > W * 1.1;
+  const gap = small ? 10 : 18;
+  const top = S.t + (small ? 48 : 72);
+  const backH = small ? 38 : 44;
+  const availH = H - top - S.b - backH - (small ? 40 : 56);
+  let cw, ch;
+  if (portrait) { cw = Math.min(W - S.l - S.r - 30, 380); ch = clamp((availH - gap * (n - 1)) / n, 92, 170); }
+  else { cw = Math.min((W - S.l - S.r - 40 - gap * (n - 1)) / n, 300); ch = clamp(availH, 120, small ? 170 : 200); }
+  const totalW = portrait ? cw : cw * n + gap * (n - 1);
+  const x0 = W / 2 - totalW / 2;
+  for (let i = 0; i < n; i++) {
+    const st = STAGES[i];
+    const x = portrait ? x0 : x0 + i * (cw + gap);
+    const y = portrait ? top + i * (ch + gap) : top;
+    const sel = Game.menuSel === i;
+    const open = Save.unlocked(i);
+    const sv = Save.st(i);
+    const shake = sel && Game.selShake > 0 ? Math.sin(Game.selShake * 60) * 6 * Game.selShake / 0.4 : 0;
+    const pop = sel ? 1 + Math.sin(Game.time * 5) * 0.01 : 1;
+    hud.save();
+    hud.translate(x + cw / 2 + shake, y + ch / 2); hud.scale(pop, pop); hud.translate(-(x + cw / 2), -(y + ch / 2));
+    panel(x, y, cw, ch, 16, open ? (sel ? 'rgba(255,250,232,.96)' : 'rgba(255,255,255,.82)') : 'rgba(70,80,110,.82)', sel ? '#ffd166' : 'rgba(255,255,255,.6)');
+    if (sel) { hud.lineWidth = 4; hud.strokeStyle = '#ffd166'; rrect(x - 3, y - 3, cw + 6, ch + 6, 18); hud.stroke(); }
+    // 色の帯
+    hud.fillStyle = open ? st.color : '#8890a8';
+    rrect(x + 10, y + 10, cw - 20, small ? 6 : 8, 4); hud.fill();
+    const lh = clamp(ch / 6, 15, 30);
+    let yy = y + 14 + lh * 0.9;
+    txtFit((i + 1) + '. ' + st.name, x + cw / 2, yy, small ? 18 : 22, cw - 20, open ? '#2c3e70' : '#fff', 'center', null);
+    yy += lh * 0.95;
+    if (open) {
+      txtFit(st.sub || '', x + cw / 2, yy, small ? 12 : 14, cw - 20, '#6a7aa0', 'center', null);
+      yy += lh;
+      const total = st.seedTotal || 0;
+      const got = sv.seeds.length;
+      // 種のアイコン
+      const iconS = clamp((cw - 30) / Math.max(total, 1), 12, 22);
+      const ix0 = x + cw / 2 - (total - 1) * iconS / 2;
+      for (let k = 0; k < total; k++) drawSeedIcon(ix0 + k * iconS, yy, iconS * 0.85, k < got, false);
+      yy += lh * 0.95;
+      txtFit('ひかりの種 ' + got + ' / ' + total + (sv.done ? '　クリア！' : ''), x + cw / 2, yy, small ? 14 : 16, cw - 20, sv.done ? '#e07a00' : '#2c3e70', 'center', null);
+      yy += lh * 0.85;
+      txtFit('ベスト ' + (sv.best ? fmtTime(sv.best) : '--:--.--'), x + cw / 2, yy, small ? 13 : 15, cw - 20, '#7a5230', 'center', null);
+    } else {
+      yy += lh * 0.4;
+      txt('？', x + cw / 2, yy + lh * 0.3, small ? 28 : 38, '#fff', 'center', 'rgba(40,50,90,.9)');
+      yy += lh * 1.4;
+      const u = st.unlock, need = STAGES[u.stage] ? STAGES[u.stage].name : '';
+      txtFit(need + 'で', x + cw / 2, yy, small ? 13 : 15, cw - 20, '#ffe9a8', 'center', null);
+      yy += lh * 0.8;
+      txtFit('ひかりの種を ' + u.seeds + 'こ 集めると ひらく（いま ' + Save.count(u.stage) + 'こ）', x + cw / 2, yy, small ? 12 : 14, cw - 20, '#ffe9a8', 'center', null);
+    }
+    hud.restore();
+    const r = menuRects[i];
+    r.x = x; r.y = y; r.w = cw; r.h = ch; r.on = true;
+  }
+  // もどる
+  const by = portrait ? top + n * (ch + gap) : top + ch + gap + 6;
+  const bw = 180, bx = W / 2 - bw / 2;
+  const selB = Game.menuSel === n;
+  panel(bx, by, bw, backH, backH / 2, selB ? 'rgba(255,209,102,.95)' : 'rgba(255,255,255,.88)', selB ? '#fff' : 'rgba(40,50,90,.35)');
+  txt('もどる', W / 2, by + backH / 2 + 1, small ? 15 : 17, selB ? '#5a3300' : '#2c3e70', 'center', null);
+  const rb = menuRects[n];
+  rb.x = bx; rb.y = by; rb.w = bw; rb.h = backH; rb.on = true;
+  const touch = Input.touchMode || Input.hasTouch;
+  if (Math.floor(Game.time * 1.5) % 2 === 0) txt(touch ? 'カードを タップして はじめる' : '←→で えらんで Enter / スペースで はじめる', W / 2, Math.min(H - S.b - 16, by + backH + 22), fs * 0.75, '#fff', 'center');
 }
 
 function drawSeedGet(W, H, fs) {
@@ -645,7 +897,8 @@ function drawSeedGet(W, H, fs) {
   drawSeedIcon(W / 2, cy - 30, 54 * bounce * k, true, true);
   txt('ひかりの種 ゲット！', W / 2, cy + 40 - (1 - k) * 30, clamp(W / 16, 26, 52) * k * (t < 0.4 ? bounce : 1), '#9cfff0', 'center');
   if (t > 0.4) txt(Game.lastSeed.name, W / 2, cy + 40 + clamp(W / 16, 26, 52) * 0.75 + 6, fs, '#fff', 'center');
-  if (t > 0.6) txt(Game.seeds + ' / ' + Level.seedTotal, W / 2, cy + 40 + clamp(W / 16, 26, 52) * 0.75 + fs + 16, fs + 4, '#ffe08a', 'center');
+  const have = Save.count(Game.stageId);
+  if (t > 0.6) txt(Game.lastOld ? 'とったことがある 種（' + have + ' / ' + Level.seedTotal + '）' : have + ' / ' + Level.seedTotal, W / 2, cy + 40 + clamp(W / 16, 26, 52) * 0.75 + fs + 16, Game.lastOld ? fs : fs + 4, Game.lastOld ? '#d8e4ff' : '#ffe08a', 'center');
 }
 
 function drawClear(W, H, fs, small) {
@@ -653,12 +906,14 @@ function drawClear(W, H, fs, small) {
   hud.fillRect(0, 0, W, H);
   const k = Math.min(1, Game.stT * 1.5);
   const cy = H * 0.24;
-  txt('ぜんぶ 集めた！ クリア！', W / 2, cy - (1 - k) * 30, clamp(W / 16, 24, 54) * (0.6 + 0.4 * k), '#ffd166', 'center');
+  txt(Level.stage.name + ' クリア！', W / 2, cy - (1 - k) * 30, clamp(W / 16, 24, 54) * (0.6 + 0.4 * k), '#ffd166', 'center');
   if (Game.stT > 0.8) {
     const pw = Math.min(W - 40, 360), ph = small ? 96 : 120;
     panel(W / 2 - pw / 2, cy + 36, pw, ph, 16, 'rgba(255,255,255,.9)', '#ffd166');
     txt('タイム ' + fmtTime(Game.playTime), W / 2, cy + 36 + ph * 0.28, fs + 4, '#2c3e70', 'center', null);
     if (Game.newRecord) txt('ベスト更新！', W / 2, cy + 36 + ph * 0.52, fs, '#ff5577', 'center', null);
+    else if (!Game.fullRun) txtFit('1回で ぜんぶ集めると タイムが のこるよ', W / 2, cy + 36 + ph * 0.52, fs * 0.8, pw - 20, '#6a7aa0', 'center', null);
+    else { const b = Save.st(Game.stageId).best; if (b) txt('ベスト ' + fmtTime(b), W / 2, cy + 36 + ph * 0.52, fs * 0.9, '#6a7aa0', 'center', null); }
     txt('どんぐり ' + Game.acorns + ' / ' + Level.acornTotal, W / 2, cy + 36 + ph * 0.78, fs, '#7a5230', 'center', null);
     if (Game.stT > 3) drawMenu(MENUS.clear, W / 2, cy + 36 + ph + 16, W, H);
   }
@@ -737,7 +992,7 @@ function frame(now) {
 function boot() {
   try {
     initGL();
-    if (R.ok) { buildModels(); buildLevel(); }
+    if (R.ok) { buildModels(); buildLevelState(0); }
   } catch (e) {
     R.ok = false;
     console.error(e);
@@ -745,7 +1000,7 @@ function boot() {
   Cam.eye[0] = 40; Cam.eye[1] = 20; Cam.eye[2] = 40;
   readSafeArea();
   // デバッグ用：KORON.step(秒) で入力を入れたまま時間を進められる（debug.manual=true のとき）
-  window.KORON = { Game, P, PL, Cam, Level, World, Input, R, Sound, Music, debug, step: stepGame, camReset, menuRects };
+  window.KORON = { Game, P, PL, Cam, Level, World, Input, R, Sound, Music, debug, step: stepGame, camReset, menuRects, Save, STAGES, goSelect, goTitle, buildLevelState };
   requestAnimationFrame(frame);
 }
 boot();

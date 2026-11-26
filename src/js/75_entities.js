@@ -12,12 +12,12 @@ function updateEntities(dt) {
       for (const l of sg.lines) Game.toast(l, 4.5);
     } else if (!sg.armed && d > 6) sg.armed = true;
   }
-  // 西の高台：印のついた敵を全部たおすと種
-  if (!Level.arenaDone) {
+  // 印のついた敵（arena）を全部たおすと種（どの種かはステージが Level.arenaSeed で決める）
+  if (!Level.arenaDone && Level.arenaSeed) {
     const arena = Level.enemies.filter((e) => e.arena);
     if (arena.length && arena.every((e) => !e.alive)) {
       Level.arenaDone = true;
-      revealSeedMsg(3, '高台の敵を ぜんぶ たおした！ ひかりの種が あらわれた！');
+      revealSeedMsg(Level.arenaSeed.id, Level.arenaSeed.msg);
     }
   }
 
@@ -32,7 +32,8 @@ function updateEntities(dt) {
         Game.acorns++;
         Sound.play('acorn');
         Fx.burst(a.x, a.y, a.z, [1, 0.85, 0.4], 6, 3);
-        if (Game.acorns === 50) Game.revealSeed(5);
+        const as = Level.acornSeed;
+        if (as && Game.acorns === as.n) revealSeedMsg(as.id, as.msg);
       }
     }
   }
@@ -68,6 +69,7 @@ function updateEntities(dt) {
     if (e.type === 'blob') updateBlob(e, dt);
     else if (e.type === 'spiky') updateSpiky(e, dt);
     else if (e.type === 'hopper') updateHopper(e, dt);
+    else if (e.type === 'snowman') updateSnowman(e, dt);
   }
 }
 
@@ -194,7 +196,7 @@ function killEnemy(e, how) {
   Level.acornTotal++;
   if (e.arena) {
     const left = Level.enemies.filter((q) => q.arena && q.alive).length;
-    if (left > 0) Game.toast(`高台の敵 のこり ${left} ひき`, 2);
+    if (left > 0) Game.toast(`${Level.arenaName || '高台の敵'} のこり ${left} ひき`, 2);
   }
 }
 
@@ -217,14 +219,17 @@ function updateSpiky(e, dt) {
 // ヒップドロップの衝撃：近くの敵を倒す
 function poundShock(x, y, z) {
   poundStakes(x, y, z);
+  for (const f of Level.poundHooks) f(x, y, z);
   for (const e of Level.enemies) {
     if (!e.alive || e.type === 'spiky') continue;
     if (Math.hypot(e.x - x, e.z - z) < 2.6 && Math.abs(e.y - y) < 1) killEnemy(e, 'pound');
   }
 }
 
+const OLD_SEED_TINT = [0.75, 0.85, 1];
 function drawEntities() {
   const t = Game.time;
+  const tint = Level.tint;
   for (const a of Level.acorns) {
     if (a.got) continue;
     drawMesh(Models.acorn, T(a.x, a.y + Math.sin(a.t) * 0.12, a.z, 1.2, 1.2, 1.2, a.t * 1.3));
@@ -238,32 +243,36 @@ function drawEntities() {
   for (const s of Level.seeds) {
     if (s.got || s.hidden) continue;
     const pulse = 1 + Math.sin(s.t * 4) * 0.06;
-    drawMesh(Models.seed, T(s.x, s.y + Math.sin(s.t * 2) * 0.2, s.z, pulse, pulse, pulse, s.t * 1.5), WHITE, 0.55);
+    // 前のプレイで取ったことがある種は半透明
+    if (s.old) drawMesh(Models.seed, T(s.x, s.y + Math.sin(s.t * 2) * 0.2, s.z, pulse, pulse, pulse, s.t * 1.5), OLD_SEED_TINT, 0.35, 0.45);
+    else drawMesh(Models.seed, T(s.x, s.y + Math.sin(s.t * 2) * 0.2, s.z, pulse, pulse, pulse, s.t * 1.5), WHITE, 0.55);
     drawShadow(s.x, s.y, s.z, 0.7, 0.25);
   }
   for (const e of Level.enemies) {
     if (!e.alive) {
       if (e.deadT < 0.3 && e.type !== 'spiky') {
         const k = 1 - e.deadT / 0.3;
-        drawMesh(e.type === 'blob' ? Models.blob : Models.hopper, T(e.x, e.y, e.z, 1 + (1 - k) * 0.6, k * 0.3 + 0.05, 1 + (1 - k) * 0.6, e.yaw));
+        const dm = e.type === 'blob' ? Models.blob : e.type === 'snowman' ? Models.snowman : Models.hopper;
+        drawMesh(dm, T(e.x, e.y, e.z, 1 + (1 - k) * 0.6, k * 0.3 + 0.05, 1 + (1 - k) * 0.6, e.yaw), tint);
       }
       continue;
     }
     if (e.type === 'hopper') {
       const sq = e.squish;
-      drawMesh(Models.hopper, T(e.x, e.y, e.z, 1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq), e.yaw));
+      drawMesh(Models.hopper, T(e.x, e.y, e.z, 1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq), e.yaw), tint);
       drawShadow(e.x, e.y + 0.1, e.z, 0.6);
       continue;
     }
+    if (e.type === 'snowman') { drawSnowman(e, tint); continue; }
     if (e.type === 'blob') {
       const wob = 1 + Math.sin(e.t * (e.state === 'chase' ? 14 : 7)) * 0.06;
       const sq = e.squish * wob;
-      drawMesh(Models.blob, T(e.x, e.y, e.z, 1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq), e.yaw));
+      drawMesh(Models.blob, T(e.x, e.y, e.z, 1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq), e.yaw), tint);
       drawShadow(e.x, e.y + 0.1, e.z, 0.7);
     } else {
       const m = T(e.x, e.y, e.z, 1, 1, 1, e.yaw);
       M4.rotX(m, e.rot);
-      drawMesh(Models.spiky, m);
+      drawMesh(Models.spiky, m, tint);
       drawShadow(e.x, e.y - 0.6, e.z, 0.75);
     }
   }

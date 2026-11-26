@@ -27,18 +27,44 @@ const Level = {
 // 2回目以降の組み立て用：形状を作らない Geo の代わり
 const NOGEO = { box() { return this; }, cyl() { return this; }, sphere() { return this; }, disc() { return this; }, torus() { return this; } };
 
-function buildLevel() {
+// ステージの一覧（id の順）。各ステージは defineStage で登録する
+//   id, name, killY（落下とみなす高さ）, start（スタート位置）, env（空・霧・光）, music（BGM の調とテンポ）,
+//   tint（地形・敵にかける色）, titleCam（タイトル・ステージ選びの背景のカメラ）, unlock（開く条件）, build(K)
+const STAGES = [];
+function defineStage(def) { STAGES[def.id] = def; return def; }
+
+// ステージの空・霧・光を R に入れる（R の中身を書きかえる。10_gl.js が毎フレーム読む）
+function applyStageEnv(st) {
+  const e = st.env;
+  if (!e || typeof R === 'undefined' || !R.sky) return;
+  R.sky.top = e.top.slice(); R.sky.bottom = e.bottom.slice(); R.sky.sun = e.sun.slice();
+  R.fogCol = e.fogCol.slice(); R.fog = e.fog.slice();
+  R.light = v3.norm(e.light.slice());
+}
+
+function buildLevel(id) {
+  if (id === undefined || id === null) id = Level.stageId || 0;
+  const st = STAGES[id] || STAGES[0];
+  Level.stageId = st.id; Level.stage = st;
   World.clear();
-  World.killY = -28;
+  World.killY = st.killY;
   Object.assign(Level, {
     acorns: [], seeds: [], hearts: [], enemies: [], movers: [], springs: [], signs: [], clouds: [],
     spinners: [], fallers: [], stakes: [], risers: [], launchers: [], mills: [], flags: [],
     stakeDone: false, arenaDone: false,
+    updaters: [], drawers: [], poundHooks: [], acornSeed: null, arenaSeed: null,
+    tint: st.tint || WHITE,
+    start: Object.assign({}, st.start),
   });
-  const cache = Level._cache || (Level._cache = {});
+  applyStageEnv(st);
+  // 地形メッシュはステージごと、共通の部品（ばね・杭など）は全ステージで使い回す
+  const caches = Level._caches || (Level._caches = {});
+  const cache = caches[st.id] || (caches[st.id] = {});
+  const shared = Level._shared || (Level._shared = {});
   const g = cache.static ? NOGEO : new Geo(0.09);
-  const rng = makeRng(20261125);
-  const once = (key, make) => cache[key] || (cache[key] = make());
+  const rng = makeRng(st.seed || 20261125);
+  const once = (key, make) => shared[key] || (shared[key] = make());
+  const onceStage = (key, make) => cache[key] || (cache[key] = make());
 
   // ---------- 部品 ----------
   const grassCol = (p, n) => (n[1] > 0.5 ? mixc(COL.grassDk, COL.grass, 0.5 + 0.5 * Math.sin(p[0] * 3.1 + p[2] * 2.3)) : p[1] > 0.75 ? COL.grassDk : COL.dirt);
@@ -55,6 +81,7 @@ function buildLevel() {
     if (kind === 'wood') return (p, n) => (n[1] > 0.5 ? COL.wood : COL.woodDk);
     if (kind === 'ice') return (p, n) => (n[1] > 0.5 ? COL.ice : shade(COL.ice, 0.85));
     if (kind === 'cloud') return (p, n) => (n[1] > 0.5 ? COL.cloud : hex(0xd6e4f4));
+    if (kind === 'snow') return (p, n) => (n[1] > 0.5 ? hex(0xf4f8ff) : p[1] > 0.3 ? hex(0xdfe8f6) : hex(0x8a8fa8));
     return (p, n) => (n[1] > 0.5 ? COL.grass : p[1] > 0.3 ? COL.grassDk : COL.dirt);
   }
   function block(cx, cy, cz, sx, sy, sz, kind = 'grass') {
@@ -232,6 +259,329 @@ function buildLevel() {
   const blobAt = (x, y, z, range = 5, arena = false) => Level.enemies.push({ type: 'blob', x, y, z, hx: x, hz: z, range, yaw: rng() * TAU, vy: 0, alive: true, t: rng() * 5, state: 'walk', st: 0, squish: 1, arena });
   const spikyAt = (ax, ay, az, bx, by, bz, speed = 5) => Level.enemies.push({ type: 'spiky', ax, ay, az, bx, by, bz, speed, u: 0, dir: 1, x: ax, y: ay, z: az, alive: true, rot: 0 });
   const hopperAt = (x, y, z, range = 4, arena = false) => Level.enemies.push({ type: 'hopper', x, y, z, hx: x, hz: z, range, yaw: rng() * TAU, vx: 0, vz: 0, vy: 0, air: false, alive: true, t: rng() * 5, st: 0.5 + rng(), squish: 1, arena });
+
+  const K = { st, g, rng, once, onceStage, grassCol, dirtCol, rockCol, island, kindColor, block, oblock, stump, tree, pine, rock, flower, tuft, scatter, fence, sign, hut, flag, windmill, mover, spinner, faller, stake, riser, launcher, acornAt, acornLine, acornRing, seedAt, heartAt, blobAt, spikyAt, hopperAt };
+  st.build(K);
+
+  // どんぐりの総数
+  Level.acornTotal = Level.acorns.length;
+  Level.seedTotal = Level.seeds.length;
+  st.seedTotal = Level.seedTotal;
+
+  // まとめた地形メッシュ（2回目以降は作り直さない）
+  if (!cache.static) { cache.static = g.mesh(); cache.staticTris = g.pos.length / 9; }
+  Level.static = cache.static;
+  Level.staticTris = cache.staticTris;
+
+  // ---- 動く物のメッシュ ----
+  const boxMesh = (sx, sy, sz, kind, jit = 0.06) => once(`box:${sx}:${sy}:${sz}:${kind}`, () => new Geo(jit).box(T(0, 0, 0, sx, sy, sz), kindColor(kind)).mesh());
+  for (const mv of Level.movers) {
+    const s = mv.s;
+    mv.mesh = boxMesh(s.x1 - s.x0, s.y1 - s.y0, s.z1 - s.z0, s.kind);
+  }
+  for (const sp of Level.spinners) {
+    sp.mesh = once(`spin:${sp.sx}:${sp.sz}:${sp.s.kind}`, () => {
+      const gg = new Geo(0.06);
+      gg.box(T(0, 0, 0, sp.sx, 0.5, sp.sz), kindColor(sp.s.kind));
+      for (let i = 0; i < 9; i++) gg.box(T(-sp.sx / 2 + 0.6 + i * ((sp.sx - 1.2) / 8), 0.26, 0, 0.12, 0.03, sp.sz), COL.woodDk);
+      gg.cyl(T(0, 0.25, 0, 0.5, 0.08, 0.5), hex(0xffd166), 12);
+      return gg.mesh();
+    });
+  }
+  for (const f of Level.fallers) {
+    f.mesh = once(`fall:${f.sx}:${f.sz}`, () => {
+      const gg = new Geo(0.12);
+      gg.box(T(0, 0, 0, f.sx, 0.6, f.sz), (p, n) => (n[1] > 0.5 ? hex(0xd9a066) : hex(0xa36a3a)));
+      gg.box(T(0.3, 0.31, -0.2, 1.4, 0.02, 0.08, 0.6), hex(0x6b4325)); // ひび
+      gg.box(T(-0.4, 0.31, 0.4, 0.9, 0.02, 0.08, -0.9), hex(0x6b4325));
+      return gg.mesh();
+    });
+  }
+  for (const r of Level.risers) {
+    r.mesh = once(`rise:${r.sx}:${r.sz}`, () => {
+      const gg = new Geo(0.03);
+      gg.box(T(0, 0, 0, r.sx, 0.7, r.sz), kindColor('cloud'));
+      for (const [ox, oz] of [[-0.8, -0.8], [0.8, -0.7], [-0.7, 0.8], [0.8, 0.8]]) gg.sphere(T(ox, -0.2, oz, 0.75, 0.5, 0.75), COL.cloud, 8, 5, { flat: true });
+      return gg.mesh();
+    });
+  }
+  Models.stake = once('stake', () => {
+    const gg = new Geo(0.08);
+    gg.cyl(T(0, 0, 0, 0.55, 2.7, 0.55), (p, n) => (n[1] > 0.5 ? hex(0xe9c08a) : COL.woodDk), 10, { flat: true });
+    gg.cyl(T(0, 2.7, 0, 0.62, 0.2, 0.62), hex(0xd8604a), 10, { flat: true });
+    return gg.mesh();
+  });
+  Models.spring = once('spring', () => {
+    const gg = new Geo();
+    gg.cyl(T(0, 0, 0, 0.8, 0.15, 0.8), COL.stoneDk, 14);
+    for (let i = 0; i < 3; i++) gg.torus(T(0, 0.18 + i * 0.12, 0, 0.55, 1, 0.55), COL.spikeTip, 1, 0.08, 14, 5);
+    gg.cyl(T(0, 0.5, 0, 0.8, 0.12, 0.8), hex(0xff5a5a), 14);
+    return gg.mesh();
+  });
+  Models.launcher = once('launcher', () => {
+    const gg = new Geo();
+    gg.cyl(T(0, -0.15, 0, 0.95, 0.15, 0.95), hex(0x7fd3ff), 16);
+    // 進む向き（+z）の矢印
+    gg.box(T(0, 0.02, -0.15, 0.3, 0.05, 0.9), COL.white);
+    gg.box(T(0.22, 0.02, 0.35, 0.18, 0.05, 0.6, 0.7), COL.white);
+    gg.box(T(-0.22, 0.02, 0.35, 0.18, 0.05, 0.6, -0.7), COL.white);
+    return gg.mesh();
+  });
+  Models.millBlades = once('mill', () => {
+    const gg = new Geo();
+    gg.cyl(T(0, 0, 0, 0.35, 0.4, 0.35, 0, Math.PI / 2), COL.woodDk, 10);
+    for (let i = 0; i < 4; i++) {
+      const m = T(0, 0, 0.25, 1, 1, 1, 0, 0, (i * Math.PI) / 2);
+      const arm = M4.copy(m); M4.translate(arm, 0, 2.0, 0); M4.scale(arm, 0.12, 4, 0.08);
+      gg.box(arm, COL.woodDk);
+      const sail = M4.copy(m); M4.translate(sail, 0.38, 2.4, 0.02); M4.scale(sail, 0.7, 3, 0.04);
+      gg.box(sail, hex(0xfaf3e6));
+    }
+    return gg.mesh();
+  });
+  Models.flagCloth2 = once('flagcloth', () => new Geo().box(T(0, 0, 0, 1, 1, 1), WHITE).mesh());
+  if (!Models.hopper) buildLevelModels();
+
+  // ---- 雲（下の雲海と、遠くの雲）----
+  const cc = st.cloud || { lo: hex(0xdde8f5), far: hex(0xe8f0fa), top: COL.cloud };
+  Level.cloudMesh = onceStage('clouds', () => {
+    const cg = new Geo(0.04);
+    const crng = makeRng(7);
+    for (let i = 0; i < 70; i++) {
+      const a = crng() * TAU, r = 30 + crng() * 140;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const y = -22 - crng() * 6;
+      const s = 6 + crng() * 10;
+      cg.sphere(T(x, y, z, s, s * 0.35, s * 0.8, crng() * 3), (p) => mixc(cc.lo, cc.top, p[1] * 0.5 + 0.5), 10, 6, { flat: true });
+    }
+    for (let i = 0; i < 18; i++) {
+      const a = crng() * TAU, r = 110 + crng() * 50;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r, y = 10 + crng() * 35;
+      for (let k = 0; k < 3; k++) {
+        const s = 4 + crng() * 5;
+        cg.sphere(T(x + (k - 1) * s * 0.9, y + crng() * 2, z, s, s * 0.6, s * 0.7), (p) => mixc(cc.far, cc.top, p[1] * 0.5 + 0.5), 10, 6, { flat: true });
+      }
+    }
+    return cg.mesh();
+  });
+  // 空（大きな球の内側）
+  Models.sky = once('sky', () => {
+    const sg = new Geo();
+    sg.sphere(T(0, 0, 0, -1, 1, 1), (p) => {
+      const y = p[1];
+      if (y > 0) return mixc(hex(0xbfe4ff), hex(0x4f9ae8), Math.pow(y, 0.7));
+      return mixc(hex(0xbfe4ff), hex(0xe9f3ff), Math.min(1, -y * 3));
+    }, 24, 14);
+    return sg.mesh();
+  });
+}
+
+// ステージ専用のモデル（新しい敵など）
+function buildLevelModels() {
+  // ---- 敵：ぴょんまる（はねて近づいてくる。踏める）----
+  const g = new Geo();
+  const body = hex(0x6fcf7f), bodyDk = hex(0x3f9a5a);
+  g.sphere(T(0, 0.5, 0, 0.5, 0.46, 0.5), (p) => (p[2] > 0.55 && p[1] < 0.1 ? hex(0xeafbe0) : mixc(bodyDk, body, clamp(p[1] + 0.7, 0, 1))), 14, 10, { flat: true });
+  for (const sx of [-1, 1]) {
+    g.sphere(T(sx * 0.2, 0.7, 0.4, 0.15, 0.17, 0.1), COL.white, 10, 6);
+    g.sphere(T(sx * 0.2, 0.68, 0.48, 0.07, 0.09, 0.05), COL.eye, 8, 5);
+    g.sphere(T(sx * 0.27, 0.08, 0.12, 0.17, 0.08, 0.24), hex(0xffb347), 8, 5); // 足
+  }
+  g.box(T(0, 0.45, 0.5, 0.18, 0.06, 0.04), COL.eye); // 口
+  // 頭の葉っぱ
+  g.cyl(T(0, 0.92, 0, 0.04, 0.25, 0.04), bodyDk, 5);
+  g.sphere(T(0.15, 1.15, 0, 0.2, 0.05, 0.1, 0, 0, 0.4), COL.leaf, 8, 4);
+  g.sphere(T(-0.15, 1.15, 0, 0.2, 0.05, 0.1, 0, 0, -0.4), COL.leaf, 8, 4);
+  Models.hopper = g.mesh();
+}
+
+// 種を出す（メッセージつき）
+function revealSeedMsg(id, msg) {
+  const s = Level.seeds.find((q) => q.id === id);
+  if (!s || !s.hidden) return;
+  s.hidden = false;
+  Sound.play('seed');
+  Fx.burst(s.x, s.y + 0.7, s.z, [0.7, 1, 0.95], 24, 6);
+  Game.toast(msg, 4);
+}
+
+// 動く足場・ばねなどの更新
+function updateLevel(dt) {
+  for (const s of World.solids) { s.dx = s.dy = s.dz = 0; if (s.rotY) s.rotY = 0; }
+  for (const mv of Level.movers) {
+    mv.t += dt * mv.speed;
+    const k = 0.5 - 0.5 * Math.cos(mv.t * Math.PI); // 0〜1 往復
+    const s = mv.s;
+    const cx = (s.x0 + s.x1) / 2, cy = (s.y0 + s.y1) / 2, cz = (s.z0 + s.z1) / 2;
+    if (mv.axis === 'x') World.move(s, lerp(mv.ax, mv.bx, k) - cx, 0, 0);
+    if (mv.axis === 'z') World.move(s, 0, 0, lerp(mv.az, mv.bz, k) - cz);
+    if (mv.axis === 'y') World.move(s, 0, lerp(mv.ay, mv.by, k) - cy, 0);
+  }
+  // 回る橋
+  for (const sp of Level.spinners) World.rotate(sp.s, sp.speed * dt);
+  // 落ちる足場：乗る → ぐらぐら（1秒）→ 落ちる → 消える → 元の場所に戻る
+  const onS = P.grounded ? P.groundS : null;
+  for (const f of Level.fallers) {
+    const s = f.s;
+    f.t += dt;
+    if (f.state === 'idle') {
+      if (onS === s) { f.state = 'shake'; f.t = 0; Sound.play('land'); }
+    } else if (f.state === 'shake') {
+      if (f.t > 1.0) { f.state = 'fall'; f.t = 0; f.vy = 0; }
+    } else if (f.state === 'fall') {
+      f.vy = Math.min(f.vy + 30 * dt, 30);
+      World.move(s, 0, -f.vy * dt, 0);
+      if (f.t > 2.2) { f.state = 'gone'; f.t = 0; s.off = true; }
+    } else if (f.state === 'gone' && f.t > 2.5) {
+      // 主人公が元の場所にいなければ戻す
+      const cx = (s.x0 + s.x1) / 2, cz = (s.z0 + s.z1) / 2;
+      const inside = Math.abs(P.x - cx) < f.sx / 2 + 0.6 && Math.abs(P.z - cz) < f.sz / 2 + 0.6 && Math.abs(P.y - f.base) < 2;
+      if (!inside) {
+        World.move(s, 0, f.base - s.y0, 0);
+        s.dy = 0;
+        s.off = false; f.state = 'idle'; f.t = 0;
+        Fx.burst(cx, s.y1, cz, [1, 0.95, 0.8], 6, 2);
+      }
+    }
+  }
+  // 杭：打ちこまれたら沈む
+  for (const st of Level.stakes) {
+    const s = st.s;
+    if (st.down && s.y1 > st.ground + 0.06) World.move(s, 0, -Math.min(dt * 7, s.y1 - (st.ground + 0.06)), 0);
+  }
+  // 雲の飛び石：下から浮かんでくる
+  for (const r of Level.risers) {
+    if (!r.active) continue;
+    r.t += dt;
+    const s = r.s;
+    const k = clamp(r.t / 1.6, 0, 1);
+    const want = r.top - 30 * Math.pow(1 - k, 3);
+    if (r.t <= 0) continue;
+    s.off = false;
+    World.move(s, 0, want - s.y1, 0);
+  }
+  // 風の筒：乗ったら飛ばす
+  for (const L of Level.launchers) {
+    L.t += dt;
+    if (P.grounded && P.groundS === L.s && (P.state === 'ground' || P.state === 'punch')) {
+      const k = L.s.launch;
+      P.grounded = false; P.groundS = null;
+      P.state = 'air'; P.airT = 0; P.stateT = 0;
+      P.yaw = k.yaw; P.speed = k.sp;
+      P.vx = Math.sin(k.yaw) * k.sp; P.vz = Math.cos(k.yaw) * k.sp; P.vy = k.vy;
+      P.longJump = true; P.jumpHeld = true; P.flip = 0.001; P.flipDir = 1; P.jumpN = 0;
+      Sound.play('spring');
+      Fx.burst(L.x, L.y + 0.3, L.z, [0.7, 0.9, 1], 16, 6);
+    }
+  }
+  for (const m of Level.mills) m.a += dt * 0.9;
+  // ステージ専用の仕掛け（つらら・風など）
+  for (const f of Level.updaters) f(dt);
+  for (const f of Level.flags) f.t += dt;
+  for (const s of Level.springs) s.boing = Math.max(0, (s.boing || 0) - dt * 3);
+}
+
+// ヒップドロップで杭を打つ（75_entities.js の poundShock から呼ぶ）
+function poundStakes(x, y, z) {
+  for (const st of Level.stakes) {
+    if (st.down) continue;
+    const s = st.s;
+    if (Math.hypot(x - s.x, z - s.z) < s.r + 0.45 && Math.abs(y - s.y1) < 0.35) {
+      st.down = true;
+      Sound.play('stomp');
+      Fx.burst(s.x, s.y1, s.z, [0.9, 0.75, 0.5], 12, 5);
+      const left = Level.stakes.filter((q) => !q.down).length;
+      if (left > 0) Game.toast(`杭を打った！ あと ${left} 本`, 2);
+      else if (!Level.stakeDone) {
+        Level.stakeDone = true;
+        Level.risers.forEach((r, i) => { r.active = true; r.t = -i * 0.45; });
+        Sound.play('seed');
+        Game.toast('南東の雲の下から 飛び石が うかんできた！', 4);
+      }
+    }
+  }
+}
+
+const FALL_TINT = [1, 0.85, 0.75], STAKE_TINT = [0.85, 0.85, 0.85];
+function drawLevel() {
+  // 空
+  gl.depthMask(false);
+  gl.disable(gl.CULL_FACE);
+  drawMesh(Models.sky, T(R.cam[0], R.cam[1], R.cam[2], 300, 300, 300), WHITE, 1, 1);
+  gl.enable(gl.CULL_FACE);
+  gl.depthMask(true);
+  drawMesh(Level.cloudMesh, T(), WHITE, 0.55, 1);
+  const tint = Level.tint;
+  drawMesh(Level.static, M4.ident(), tint);
+  const t = Game.time;
+  for (const mv of Level.movers) {
+    const s = mv.s;
+    drawMesh(mv.mesh, T((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2, (s.z0 + s.z1) / 2), tint);
+  }
+  for (const sp of Level.spinners) {
+    const s = sp.s;
+    drawMesh(sp.mesh, T(s.cx, (s.y0 + s.y1) / 2, s.cz, 1, 1, 1, s.ang), tint);
+  }
+  for (const f of Level.fallers) {
+    if (f.state === 'gone') continue;
+    const s = f.s;
+    const sh = f.state === 'shake' ? 0.08 : 0;
+    drawMesh(f.mesh, T((s.x0 + s.x1) / 2 + Math.sin(t * 60) * sh, (s.y0 + s.y1) / 2, (s.z0 + s.z1) / 2 + Math.cos(t * 53) * sh), f.state === 'idle' ? tint : FALL_TINT);
+  }
+  for (const r of Level.risers) {
+    if (r.s.off) continue;
+    const s = r.s;
+    drawMesh(r.mesh, T((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2 + Math.sin(t * 1.6 + s.x0) * 0.04, (s.z0 + s.z1) / 2), tint);
+  }
+  for (const st of Level.stakes) {
+    const s = st.s;
+    drawMesh(Models.stake, T(s.x, s.y1 - 2.9, s.z), st.down ? STAKE_TINT : tint);
+  }
+  for (const L of Level.launchers) {
+    const k = 0.5 + 0.5 * Math.sin(L.t * 5);
+    drawMesh(Models.launcher, T(L.x, L.y, L.z, 1, 1, 1, L.yaw), WHITE, 0.2 + k * 0.4);
+  }
+  for (const m of Level.mills) {
+    const mm = T(m.x, m.y, m.z, 1, 1, 1, m.yaw);
+    M4.rotZ(mm, m.a);
+    drawMesh(Models.millBlades, mm, tint);
+  }
+  // 旗の布：細い帯を波打たせる
+  for (const f of Level.flags) {
+    const n = 5, w = 1.3 / n;
+    for (let i = 0; i < n; i++) {
+      const u = (i + 0.5) / n;
+      const wave = Math.sin(f.t * 5 - i * 0.9) * 0.18 * u;
+      drawMesh(Models.flagCloth2, T(f.x + 0.08 + u * 1.3, f.y - 0.35 - u * 0.08, f.z + wave, w * 1.02, 0.72 - u * 0.1, 0.05, Math.sin(f.t * 5 - i * 0.9) * 0.3), f.col);
+    }
+  }
+  for (const s of Level.springs) {
+    const b = s.boing || 0;
+    drawMesh(Models.spring, T((s.x0 + s.x1) / 2, s.y0, (s.z0 + s.z1) / 2, 1, 1 + Math.sin(b * 12) * b * 0.6, 1), tint);
+  }
+  // ステージ専用の物
+  for (const f of Level.drawers) f(t, tint);
+}
+
+
+// ================= ステージ1「そよかぜ空島」 =================
+// 起動したときの R の空・霧・光を、このステージの色として覚えておく
+const ENV_DEFAULT = typeof R !== 'undefined' && R.sky ? { top: R.sky.top.slice(), bottom: R.sky.bottom.slice(), sun: R.sky.sun.slice(), fogCol: R.fogCol.slice(), fog: R.fog.slice(), light: R.light.slice() } : null;
+defineStage({
+  id: 0, name: 'そよかぜ空島', sub: 'はじまりの草原と 風の塔',
+  killY: -28, seed: 20261125, seedTotal: 8,
+  start: { x: 0, y: 0, z: 16, yaw: Math.PI },
+  env: ENV_DEFAULT,
+  music: { key: 0, bpm: 128 },
+  titleCam: { r: 46, y: 22, tx: 0, ty: 4, tz: -4 },
+  color: '#8ee0ff',
+  build: buildStage1,
+});
+function buildStage1(K) {
+  const { g, rng, once, onceStage, grassCol, dirtCol, rockCol, island, kindColor, block, oblock, stump, tree, pine, rock, flower, tuft, scatter, fence, sign, hut, flag, windmill, mover, spinner, faller, stake, riser, launcher, acornAt, acornLine, acornRing, seedAt, heartAt, blobAt, spikyAt, hopperAt } = K;
+  void once; void onceStage;
+  Level.acornSeed = { n: 50, id: 5, msg: 'どんぐり50こ！ スタート地点に ひかりの種が あらわれた！' };
+  Level.arenaSeed = { id: 3, msg: '高台の敵を ぜんぶ たおした！ ひかりの種が あらわれた！' };
 
   // ================= 中央の島（はじまりの草原） =================
   island(0, 0, 28, 0, 10);
@@ -472,294 +822,4 @@ function buildLevel() {
     Level.springs.push(World.boxC(x - 1.4, -3.25, z + 1.4, 1.6, 0.5, 1.6, 'spring'));
   }
 
-  // どんぐりの総数
-  Level.acornTotal = Level.acorns.length;
-  Level.seedTotal = Level.seeds.length;
-
-  // まとめた地形メッシュ（2回目以降は作り直さない）
-  if (!cache.static) { cache.static = g.mesh(); cache.staticTris = g.pos.length / 9; }
-  Level.static = cache.static;
-  Level.staticTris = cache.staticTris;
-
-  // ---- 動く物のメッシュ ----
-  const boxMesh = (sx, sy, sz, kind, jit = 0.06) => once(`box:${sx}:${sy}:${sz}:${kind}`, () => new Geo(jit).box(T(0, 0, 0, sx, sy, sz), kindColor(kind)).mesh());
-  for (const mv of Level.movers) {
-    const s = mv.s;
-    mv.mesh = boxMesh(s.x1 - s.x0, s.y1 - s.y0, s.z1 - s.z0, s.kind);
-  }
-  for (const sp of Level.spinners) {
-    sp.mesh = once(`spin:${sp.sx}:${sp.sz}`, () => {
-      const gg = new Geo(0.06);
-      gg.box(T(0, 0, 0, sp.sx, 0.5, sp.sz), kindColor('wood'));
-      for (let i = 0; i < 9; i++) gg.box(T(-sp.sx / 2 + 0.6 + i * ((sp.sx - 1.2) / 8), 0.26, 0, 0.12, 0.03, sp.sz), COL.woodDk);
-      gg.cyl(T(0, 0.25, 0, 0.5, 0.08, 0.5), hex(0xffd166), 12);
-      return gg.mesh();
-    });
-  }
-  for (const f of Level.fallers) {
-    f.mesh = once(`fall:${f.sx}:${f.sz}`, () => {
-      const gg = new Geo(0.12);
-      gg.box(T(0, 0, 0, f.sx, 0.6, f.sz), (p, n) => (n[1] > 0.5 ? hex(0xd9a066) : hex(0xa36a3a)));
-      gg.box(T(0.3, 0.31, -0.2, 1.4, 0.02, 0.08, 0.6), hex(0x6b4325)); // ひび
-      gg.box(T(-0.4, 0.31, 0.4, 0.9, 0.02, 0.08, -0.9), hex(0x6b4325));
-      return gg.mesh();
-    });
-  }
-  for (const r of Level.risers) {
-    r.mesh = once(`rise:${r.sx}:${r.sz}`, () => {
-      const gg = new Geo(0.03);
-      gg.box(T(0, 0, 0, r.sx, 0.7, r.sz), kindColor('cloud'));
-      for (const [ox, oz] of [[-0.8, -0.8], [0.8, -0.7], [-0.7, 0.8], [0.8, 0.8]]) gg.sphere(T(ox, -0.2, oz, 0.75, 0.5, 0.75), COL.cloud, 8, 5, { flat: true });
-      return gg.mesh();
-    });
-  }
-  Models.stake = once('stake', () => {
-    const gg = new Geo(0.08);
-    gg.cyl(T(0, 0, 0, 0.55, 2.7, 0.55), (p, n) => (n[1] > 0.5 ? hex(0xe9c08a) : COL.woodDk), 10, { flat: true });
-    gg.cyl(T(0, 2.7, 0, 0.62, 0.2, 0.62), hex(0xd8604a), 10, { flat: true });
-    return gg.mesh();
-  });
-  Models.spring = once('spring', () => {
-    const gg = new Geo();
-    gg.cyl(T(0, 0, 0, 0.8, 0.15, 0.8), COL.stoneDk, 14);
-    for (let i = 0; i < 3; i++) gg.torus(T(0, 0.18 + i * 0.12, 0, 0.55, 1, 0.55), COL.spikeTip, 1, 0.08, 14, 5);
-    gg.cyl(T(0, 0.5, 0, 0.8, 0.12, 0.8), hex(0xff5a5a), 14);
-    return gg.mesh();
-  });
-  Models.launcher = once('launcher', () => {
-    const gg = new Geo();
-    gg.cyl(T(0, -0.15, 0, 0.95, 0.15, 0.95), hex(0x7fd3ff), 16);
-    // 進む向き（+z）の矢印
-    gg.box(T(0, 0.02, -0.15, 0.3, 0.05, 0.9), COL.white);
-    gg.box(T(0.22, 0.02, 0.35, 0.18, 0.05, 0.6, 0.7), COL.white);
-    gg.box(T(-0.22, 0.02, 0.35, 0.18, 0.05, 0.6, -0.7), COL.white);
-    return gg.mesh();
-  });
-  Models.millBlades = once('mill', () => {
-    const gg = new Geo();
-    gg.cyl(T(0, 0, 0, 0.35, 0.4, 0.35, 0, Math.PI / 2), COL.woodDk, 10);
-    for (let i = 0; i < 4; i++) {
-      const m = T(0, 0, 0.25, 1, 1, 1, 0, 0, (i * Math.PI) / 2);
-      const arm = M4.copy(m); M4.translate(arm, 0, 2.0, 0); M4.scale(arm, 0.12, 4, 0.08);
-      gg.box(arm, COL.woodDk);
-      const sail = M4.copy(m); M4.translate(sail, 0.38, 2.4, 0.02); M4.scale(sail, 0.7, 3, 0.04);
-      gg.box(sail, hex(0xfaf3e6));
-    }
-    return gg.mesh();
-  });
-  Models.flagCloth2 = once('flagcloth', () => new Geo().box(T(0, 0, 0, 1, 1, 1), WHITE).mesh());
-  if (!Models.hopper) buildLevelModels();
-
-  // ---- 雲（下の雲海と、遠くの雲）----
-  Level.cloudMesh = once('clouds', () => {
-    const cg = new Geo(0.04);
-    const crng = makeRng(7);
-    for (let i = 0; i < 70; i++) {
-      const a = crng() * TAU, r = 30 + crng() * 140;
-      const x = Math.cos(a) * r, z = Math.sin(a) * r;
-      const y = -22 - crng() * 6;
-      const s = 6 + crng() * 10;
-      cg.sphere(T(x, y, z, s, s * 0.35, s * 0.8, crng() * 3), (p) => mixc(hex(0xdde8f5), COL.cloud, p[1] * 0.5 + 0.5), 10, 6, { flat: true });
-    }
-    for (let i = 0; i < 18; i++) {
-      const a = crng() * TAU, r = 110 + crng() * 50;
-      const x = Math.cos(a) * r, z = Math.sin(a) * r, y = 10 + crng() * 35;
-      for (let k = 0; k < 3; k++) {
-        const s = 4 + crng() * 5;
-        cg.sphere(T(x + (k - 1) * s * 0.9, y + crng() * 2, z, s, s * 0.6, s * 0.7), (p) => mixc(hex(0xe8f0fa), COL.cloud, p[1] * 0.5 + 0.5), 10, 6, { flat: true });
-      }
-    }
-    return cg.mesh();
-  });
-  // 空（大きな球の内側）
-  Models.sky = once('sky', () => {
-    const sg = new Geo();
-    sg.sphere(T(0, 0, 0, -1, 1, 1), (p) => {
-      const y = p[1];
-      if (y > 0) return mixc(hex(0xbfe4ff), hex(0x4f9ae8), Math.pow(y, 0.7));
-      return mixc(hex(0xbfe4ff), hex(0xe9f3ff), Math.min(1, -y * 3));
-    }, 24, 14);
-    return sg.mesh();
-  });
-}
-
-// ステージ専用のモデル（新しい敵など）
-function buildLevelModels() {
-  // ---- 敵：ぴょんまる（はねて近づいてくる。踏める）----
-  const g = new Geo();
-  const body = hex(0x6fcf7f), bodyDk = hex(0x3f9a5a);
-  g.sphere(T(0, 0.5, 0, 0.5, 0.46, 0.5), (p) => (p[2] > 0.55 && p[1] < 0.1 ? hex(0xeafbe0) : mixc(bodyDk, body, clamp(p[1] + 0.7, 0, 1))), 14, 10, { flat: true });
-  for (const sx of [-1, 1]) {
-    g.sphere(T(sx * 0.2, 0.7, 0.4, 0.15, 0.17, 0.1), COL.white, 10, 6);
-    g.sphere(T(sx * 0.2, 0.68, 0.48, 0.07, 0.09, 0.05), COL.eye, 8, 5);
-    g.sphere(T(sx * 0.27, 0.08, 0.12, 0.17, 0.08, 0.24), hex(0xffb347), 8, 5); // 足
-  }
-  g.box(T(0, 0.45, 0.5, 0.18, 0.06, 0.04), COL.eye); // 口
-  // 頭の葉っぱ
-  g.cyl(T(0, 0.92, 0, 0.04, 0.25, 0.04), bodyDk, 5);
-  g.sphere(T(0.15, 1.15, 0, 0.2, 0.05, 0.1, 0, 0, 0.4), COL.leaf, 8, 4);
-  g.sphere(T(-0.15, 1.15, 0, 0.2, 0.05, 0.1, 0, 0, -0.4), COL.leaf, 8, 4);
-  Models.hopper = g.mesh();
-}
-
-// 種を出す（メッセージつき）
-function revealSeedMsg(id, msg) {
-  const s = Level.seeds.find((q) => q.id === id);
-  if (!s || !s.hidden) return;
-  s.hidden = false;
-  Sound.play('seed');
-  Fx.burst(s.x, s.y + 0.7, s.z, [0.7, 1, 0.95], 24, 6);
-  Game.toast(msg, 4);
-}
-
-// 動く足場・ばねなどの更新
-function updateLevel(dt) {
-  for (const s of World.solids) { s.dx = s.dy = s.dz = 0; if (s.rotY) s.rotY = 0; }
-  for (const mv of Level.movers) {
-    mv.t += dt * mv.speed;
-    const k = 0.5 - 0.5 * Math.cos(mv.t * Math.PI); // 0〜1 往復
-    const s = mv.s;
-    const cx = (s.x0 + s.x1) / 2, cy = (s.y0 + s.y1) / 2, cz = (s.z0 + s.z1) / 2;
-    if (mv.axis === 'x') World.move(s, lerp(mv.ax, mv.bx, k) - cx, 0, 0);
-    if (mv.axis === 'z') World.move(s, 0, 0, lerp(mv.az, mv.bz, k) - cz);
-    if (mv.axis === 'y') World.move(s, 0, lerp(mv.ay, mv.by, k) - cy, 0);
-  }
-  // 回る橋
-  for (const sp of Level.spinners) World.rotate(sp.s, sp.speed * dt);
-  // 落ちる足場：乗る → ぐらぐら（1秒）→ 落ちる → 消える → 元の場所に戻る
-  const onS = P.grounded ? P.groundS : null;
-  for (const f of Level.fallers) {
-    const s = f.s;
-    f.t += dt;
-    if (f.state === 'idle') {
-      if (onS === s) { f.state = 'shake'; f.t = 0; Sound.play('land'); }
-    } else if (f.state === 'shake') {
-      if (f.t > 1.0) { f.state = 'fall'; f.t = 0; f.vy = 0; }
-    } else if (f.state === 'fall') {
-      f.vy = Math.min(f.vy + 30 * dt, 30);
-      World.move(s, 0, -f.vy * dt, 0);
-      if (f.t > 2.2) { f.state = 'gone'; f.t = 0; s.off = true; }
-    } else if (f.state === 'gone' && f.t > 2.5) {
-      // 主人公が元の場所にいなければ戻す
-      const cx = (s.x0 + s.x1) / 2, cz = (s.z0 + s.z1) / 2;
-      const inside = Math.abs(P.x - cx) < f.sx / 2 + 0.6 && Math.abs(P.z - cz) < f.sz / 2 + 0.6 && Math.abs(P.y - f.base) < 2;
-      if (!inside) {
-        World.move(s, 0, f.base - s.y0, 0);
-        s.dy = 0;
-        s.off = false; f.state = 'idle'; f.t = 0;
-        Fx.burst(cx, s.y1, cz, [1, 0.95, 0.8], 6, 2);
-      }
-    }
-  }
-  // 杭：打ちこまれたら沈む
-  for (const st of Level.stakes) {
-    const s = st.s;
-    if (st.down && s.y1 > st.ground + 0.06) World.move(s, 0, -Math.min(dt * 7, s.y1 - (st.ground + 0.06)), 0);
-  }
-  // 雲の飛び石：下から浮かんでくる
-  for (const r of Level.risers) {
-    if (!r.active) continue;
-    r.t += dt;
-    const s = r.s;
-    const k = clamp(r.t / 1.6, 0, 1);
-    const want = r.top - 30 * Math.pow(1 - k, 3);
-    if (r.t <= 0) continue;
-    s.off = false;
-    World.move(s, 0, want - s.y1, 0);
-  }
-  // 風の筒：乗ったら飛ばす
-  for (const L of Level.launchers) {
-    L.t += dt;
-    if (P.grounded && P.groundS === L.s && (P.state === 'ground' || P.state === 'punch')) {
-      const k = L.s.launch;
-      P.grounded = false; P.groundS = null;
-      P.state = 'air'; P.airT = 0; P.stateT = 0;
-      P.yaw = k.yaw; P.speed = k.sp;
-      P.vx = Math.sin(k.yaw) * k.sp; P.vz = Math.cos(k.yaw) * k.sp; P.vy = k.vy;
-      P.longJump = true; P.jumpHeld = true; P.flip = 0.001; P.flipDir = 1; P.jumpN = 0;
-      Sound.play('spring');
-      Fx.burst(L.x, L.y + 0.3, L.z, [0.7, 0.9, 1], 16, 6);
-    }
-  }
-  for (const m of Level.mills) m.a += dt * 0.9;
-  for (const f of Level.flags) f.t += dt;
-  for (const s of Level.springs) s.boing = Math.max(0, (s.boing || 0) - dt * 3);
-}
-
-// ヒップドロップで杭を打つ（75_entities.js の poundShock から呼ぶ）
-function poundStakes(x, y, z) {
-  for (const st of Level.stakes) {
-    if (st.down) continue;
-    const s = st.s;
-    if (Math.hypot(x - s.x, z - s.z) < s.r + 0.45 && Math.abs(y - s.y1) < 0.35) {
-      st.down = true;
-      Sound.play('stomp');
-      Fx.burst(s.x, s.y1, s.z, [0.9, 0.75, 0.5], 12, 5);
-      const left = Level.stakes.filter((q) => !q.down).length;
-      if (left > 0) Game.toast(`杭を打った！ あと ${left} 本`, 2);
-      else if (!Level.stakeDone) {
-        Level.stakeDone = true;
-        Level.risers.forEach((r, i) => { r.active = true; r.t = -i * 0.45; });
-        Sound.play('seed');
-        Game.toast('南東の雲の下から 飛び石が うかんできた！', 4);
-      }
-    }
-  }
-}
-
-function drawLevel() {
-  // 空
-  gl.depthMask(false);
-  gl.disable(gl.CULL_FACE);
-  drawMesh(Models.sky, T(R.cam[0], R.cam[1], R.cam[2], 300, 300, 300), WHITE, 1, 1);
-  gl.enable(gl.CULL_FACE);
-  gl.depthMask(true);
-  drawMesh(Level.cloudMesh, T(), WHITE, 0.55, 1);
-  drawMesh(Level.static, M4.ident());
-  const t = Game.time;
-  for (const mv of Level.movers) {
-    const s = mv.s;
-    drawMesh(mv.mesh, T((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2, (s.z0 + s.z1) / 2));
-  }
-  for (const sp of Level.spinners) {
-    const s = sp.s;
-    drawMesh(sp.mesh, T(s.cx, (s.y0 + s.y1) / 2, s.cz, 1, 1, 1, s.ang));
-  }
-  for (const f of Level.fallers) {
-    if (f.state === 'gone') continue;
-    const s = f.s;
-    const sh = f.state === 'shake' ? 0.08 : 0;
-    drawMesh(f.mesh, T((s.x0 + s.x1) / 2 + Math.sin(t * 60) * sh, (s.y0 + s.y1) / 2, (s.z0 + s.z1) / 2 + Math.cos(t * 53) * sh), f.state === 'idle' ? WHITE : [1, 0.85, 0.75]);
-  }
-  for (const r of Level.risers) {
-    if (r.s.off) continue;
-    const s = r.s;
-    drawMesh(r.mesh, T((s.x0 + s.x1) / 2, (s.y0 + s.y1) / 2 + Math.sin(t * 1.6 + s.x0) * 0.04, (s.z0 + s.z1) / 2));
-  }
-  for (const st of Level.stakes) {
-    const s = st.s;
-    drawMesh(Models.stake, T(s.x, s.y1 - 2.9, s.z), st.down ? [0.85, 0.85, 0.85] : WHITE);
-  }
-  for (const L of Level.launchers) {
-    const k = 0.5 + 0.5 * Math.sin(L.t * 5);
-    drawMesh(Models.launcher, T(L.x, L.y, L.z, 1, 1, 1, L.yaw), WHITE, 0.2 + k * 0.4);
-  }
-  for (const m of Level.mills) {
-    const mm = T(m.x, m.y, m.z, 1, 1, 1, m.yaw);
-    M4.rotZ(mm, m.a);
-    drawMesh(Models.millBlades, mm);
-  }
-  // 旗の布：細い帯を波打たせる
-  for (const f of Level.flags) {
-    const n = 5, w = 1.3 / n;
-    for (let i = 0; i < n; i++) {
-      const u = (i + 0.5) / n;
-      const wave = Math.sin(f.t * 5 - i * 0.9) * 0.18 * u;
-      drawMesh(Models.flagCloth2, T(f.x + 0.08 + u * 1.3, f.y - 0.35 - u * 0.08, f.z + wave, w * 1.02, 0.72 - u * 0.1, 0.05, Math.sin(f.t * 5 - i * 0.9) * 0.3), f.col);
-    }
-  }
-  for (const s of Level.springs) {
-    const b = s.boing || 0;
-    drawMesh(Models.spring, T((s.x0 + s.x1) / 2, s.y0, (s.z0 + s.z1) / 2, 1, 1 + Math.sin(b * 12) * b * 0.6, 1));
-  }
 }
