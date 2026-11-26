@@ -1,3 +1,15 @@
+// 保存場所：localStorage が使えない環境（プライベートモード、埋め込み表示など）でも止まらないように、
+// 使えないときはメモリに保存する（その場合、ページを閉じると消える）
+const store = (() => {
+  try {
+    const s = window.localStorage;
+    s.setItem('koron-test', '1'); s.removeItem('koron-test');
+    return s;
+  } catch (e) {
+    const m = new Map();
+    return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)); }, removeItem: (k) => { m.delete(k); } };
+  }
+})();
 // 数学ユーティリティ（ベクトル・行列）
 const TAU = Math.PI * 2;
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);

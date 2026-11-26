@@ -35,6 +35,18 @@ canvas {
 <script>(() => {
 'use strict';
 // ===== 00_math.js =====
+// 保存場所：localStorage が使えない環境（プライベートモード、埋め込み表示など）でも止まらないように、
+// 使えないときはメモリに保存する（その場合、ページを閉じると消える）
+const store = (() => {
+  try {
+    const s = window.localStorage;
+    s.setItem('koron-test', '1'); s.removeItem('koron-test');
+    return s;
+  } catch (e) {
+    const m = new Map();
+    return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)); }, removeItem: (k) => { m.delete(k); } };
+  }
+})();
 // 数学ユーティリティ（ベクトル・行列）
 const TAU = Math.PI * 2;
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -207,9 +219,9 @@ const glCanvas = document.getElementById('gl');
 const gl = glCanvas.getContext('webgl2', { antialias: perfWantsAA(), alpha: false, powerPreference: 'high-performance' });
 function perfWantsAA() {
   try {
-    const q = localStorage.getItem('koron-quality') || 'auto';
+    const q = store.getItem('koron-quality') || 'auto';
     if (q === 'low') return false;
-    if (q === 'auto' && Number(localStorage.getItem('koron-perf-tier') || 0) >= 3) return false;
+    if (q === 'auto' && Number(store.getItem('koron-perf-tier') || 0) >= 3) return false;
   } catch (e) { /* localStorage が使えないときはそのまま */ }
   return true;
 }
@@ -1119,7 +1131,7 @@ const Perf = {
 
   init() {
     try {
-      const m = localStorage.getItem('koron-quality');
+      const m = store.getItem('koron-quality');
       if (PERF_MODES.includes(m)) this.mode = m;
     } catch (e) { /* 保存できない環境 */ }
     this.tier = this.mode === 'auto' ? this.guessTier() : PERF_MODE_TIER[this.mode];
@@ -1131,7 +1143,7 @@ const Perf = {
   // 自動のときの最初の段階：前回落ち着いた段階があればそこから。なければ端末から見当をつける
   guessTier() {
     let saved = NaN;
-    try { saved = Number(localStorage.getItem('koron-perf-tier')); } catch (e) { /* なし */ }
+    try { saved = Number(store.getItem('koron-perf-tier')); } catch (e) { /* なし */ }
     if (saved >= 0 && saved < PERF_TIERS.length) return Math.max(0, saved - 0); // 前回の段階から
     const touch = 'ontouchstart' in window || (navigator.maxTouchPoints || 0) > 0;
     const px = window.innerWidth * window.innerHeight * Math.min(window.devicePixelRatio || 1, 2) ** 2;
@@ -1154,7 +1166,7 @@ const Perf = {
   setMode(m) {
     if (!PERF_MODES.includes(m)) return;
     this.mode = m;
-    try { localStorage.setItem('koron-quality', m); } catch (e) { /* 保存できない */ }
+    try { store.setItem('koron-quality', m); } catch (e) { /* 保存できない */ }
     this.floor = 99; this.noGain = 0; this.lowWins = 0; this.goodT = 0;
     this.upHold.fill(10000);
     this.setTier(m === 'auto' ? this.tier : PERF_MODE_TIER[m], 'manual');
@@ -1171,7 +1183,7 @@ const Perf = {
     if (R.ok && gl) { flushDraws(); R.q = this.q; applyQuality(); }
     this.graceT = 700; // シェーダーを作り直す分の引っかかりは数えない
     this.winT = this.winN = this.slowN = 0;
-    if (this.mode === 'auto') { try { localStorage.setItem('koron-perf-tier', String(t)); } catch (e) { /* なし */ } }
+    if (this.mode === 'auto') { try { store.setItem('koron-perf-tier', String(t)); } catch (e) { /* なし */ } }
   },
 
   // 毎フレーム beginFrame から呼ぶ。前のフレームからの時間で fps を集計し、段階を上げ下げする
@@ -1828,8 +1840,8 @@ const Sound = {
   ctx: null,
   master: null, sfxBus: null, bgmBus: null, echo: null,
   noiseBuf: null,
-  sfxOn: localStorage.getItem('koron-sfx') !== '0' && localStorage.getItem('koron-mute') !== '1',
-  bgmOn: localStorage.getItem('koron-bgm') !== '0',
+  sfxOn: store.getItem('koron-sfx') !== '0' && store.getItem('koron-mute') !== '1',
+  bgmOn: store.getItem('koron-bgm') !== '0',
   duck: 1,           // BGM を一時的に小さくする倍率
   lastAcornT: 0, acornChain: 0,
   get muted() { return !this.sfxOn && !this.bgmOn; },
@@ -1861,13 +1873,13 @@ const Sound = {
   },
   setSfx(on) {
     this.sfxOn = on;
-    localStorage.setItem('koron-sfx', on ? '1' : '0');
-    localStorage.removeItem('koron-mute');
+    store.setItem('koron-sfx', on ? '1' : '0');
+    store.removeItem('koron-mute');
     if (this.sfxBus) this.sfxBus.gain.setTargetAtTime(on ? 0.55 : 0, this.ctx.currentTime, 0.02);
   },
   setBgm(on) {
     this.bgmOn = on;
-    localStorage.setItem('koron-bgm', on ? '1' : '0');
+    store.setItem('koron-bgm', on ? '1' : '0');
     this.applyBgmGain();
   },
   setDuck(k) {
@@ -7143,10 +7155,10 @@ const Save = {
   data: { v: 1, stages: {} },
   load() {
     let d = null;
-    try { d = JSON.parse(localStorage.getItem(this.KEY) || 'null'); } catch (e) { d = null; }
+    try { d = JSON.parse(store.getItem(this.KEY) || 'null'); } catch (e) { d = null; }
     if (!d || typeof d !== 'object' || !d.stages || typeof d.stages !== 'object') d = { v: 1, stages: {} };
     // 前の版のベストタイム（ステージが1つだったころ）を引きつぐ
-    const old = Number(localStorage.getItem('koron-best') || 0);
+    const old = Number(store.getItem('koron-best') || 0);
     if (old > 0) {
       const s0 = d.stages[0] || (d.stages[0] = { seeds: [], best: 0, done: false });
       if (!s0.best) s0.best = old;
@@ -7154,7 +7166,7 @@ const Save = {
     this.data = d;
   },
   write() {
-    try { localStorage.setItem(this.KEY, JSON.stringify(this.data)); localStorage.removeItem('koron-best'); } catch (e) { /* 保存できない環境でも遊べるように */ }
+    try { store.setItem(this.KEY, JSON.stringify(this.data)); store.removeItem('koron-best'); } catch (e) { /* 保存できない環境でも遊べるように */ }
   },
   st(id) {
     const ss = this.data.stages;
@@ -7177,7 +7189,7 @@ const Save = {
   },
   clear() {
     this.data = { v: 1, stages: {} };
-    try { localStorage.removeItem(this.KEY); localStorage.removeItem('koron-best'); } catch (e) { /* なにもしない */ }
+    try { store.removeItem(this.KEY); store.removeItem('koron-best'); } catch (e) { /* なにもしない */ }
   },
 };
 Save.load();

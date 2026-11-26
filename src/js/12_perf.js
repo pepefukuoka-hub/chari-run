@@ -41,7 +41,7 @@ const Perf = {
 
   init() {
     try {
-      const m = localStorage.getItem('koron-quality');
+      const m = store.getItem('koron-quality');
       if (PERF_MODES.includes(m)) this.mode = m;
     } catch (e) { /* 保存できない環境 */ }
     this.tier = this.mode === 'auto' ? this.guessTier() : PERF_MODE_TIER[this.mode];
@@ -53,7 +53,7 @@ const Perf = {
   // 自動のときの最初の段階：前回落ち着いた段階があればそこから。なければ端末から見当をつける
   guessTier() {
     let saved = NaN;
-    try { saved = Number(localStorage.getItem('koron-perf-tier')); } catch (e) { /* なし */ }
+    try { saved = Number(store.getItem('koron-perf-tier')); } catch (e) { /* なし */ }
     if (saved >= 0 && saved < PERF_TIERS.length) return Math.max(0, saved - 0); // 前回の段階から
     const touch = 'ontouchstart' in window || (navigator.maxTouchPoints || 0) > 0;
     const px = window.innerWidth * window.innerHeight * Math.min(window.devicePixelRatio || 1, 2) ** 2;
@@ -76,7 +76,7 @@ const Perf = {
   setMode(m) {
     if (!PERF_MODES.includes(m)) return;
     this.mode = m;
-    try { localStorage.setItem('koron-quality', m); } catch (e) { /* 保存できない */ }
+    try { store.setItem('koron-quality', m); } catch (e) { /* 保存できない */ }
     this.floor = 99; this.noGain = 0; this.lowWins = 0; this.goodT = 0;
     this.upHold.fill(10000);
     this.setTier(m === 'auto' ? this.tier : PERF_MODE_TIER[m], 'manual');
@@ -93,7 +93,7 @@ const Perf = {
     if (R.ok && gl) { flushDraws(); R.q = this.q; applyQuality(); }
     this.graceT = 700; // シェーダーを作り直す分の引っかかりは数えない
     this.winT = this.winN = this.slowN = 0;
-    if (this.mode === 'auto') { try { localStorage.setItem('koron-perf-tier', String(t)); } catch (e) { /* なし */ } }
+    if (this.mode === 'auto') { try { store.setItem('koron-perf-tier', String(t)); } catch (e) { /* なし */ } }
   },
 
   // 毎フレーム beginFrame から呼ぶ。前のフレームからの時間で fps を集計し、段階を上げ下げする

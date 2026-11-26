@@ -4,8 +4,8 @@ const Sound = {
   ctx: null,
   master: null, sfxBus: null, bgmBus: null, echo: null,
   noiseBuf: null,
-  sfxOn: localStorage.getItem('koron-sfx') !== '0' && localStorage.getItem('koron-mute') !== '1',
-  bgmOn: localStorage.getItem('koron-bgm') !== '0',
+  sfxOn: store.getItem('koron-sfx') !== '0' && store.getItem('koron-mute') !== '1',
+  bgmOn: store.getItem('koron-bgm') !== '0',
   duck: 1,           // BGM を一時的に小さくする倍率
   lastAcornT: 0, acornChain: 0,
   get muted() { return !this.sfxOn && !this.bgmOn; },
@@ -37,13 +37,13 @@ const Sound = {
   },
   setSfx(on) {
     this.sfxOn = on;
-    localStorage.setItem('koron-sfx', on ? '1' : '0');
-    localStorage.removeItem('koron-mute');
+    store.setItem('koron-sfx', on ? '1' : '0');
+    store.removeItem('koron-mute');
     if (this.sfxBus) this.sfxBus.gain.setTargetAtTime(on ? 0.55 : 0, this.ctx.currentTime, 0.02);
   },
   setBgm(on) {
     this.bgmOn = on;
-    localStorage.setItem('koron-bgm', on ? '1' : '0');
+    store.setItem('koron-bgm', on ? '1' : '0');
     this.applyBgmGain();
   },
   setDuck(k) {

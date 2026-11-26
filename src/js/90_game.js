@@ -8,10 +8,10 @@ const Save = {
   data: { v: 1, stages: {} },
   load() {
     let d = null;
-    try { d = JSON.parse(localStorage.getItem(this.KEY) || 'null'); } catch (e) { d = null; }
+    try { d = JSON.parse(store.getItem(this.KEY) || 'null'); } catch (e) { d = null; }
     if (!d || typeof d !== 'object' || !d.stages || typeof d.stages !== 'object') d = { v: 1, stages: {} };
     // 前の版のベストタイム（ステージが1つだったころ）を引きつぐ
-    const old = Number(localStorage.getItem('koron-best') || 0);
+    const old = Number(store.getItem('koron-best') || 0);
     if (old > 0) {
       const s0 = d.stages[0] || (d.stages[0] = { seeds: [], best: 0, done: false });
       if (!s0.best) s0.best = old;
@@ -19,7 +19,7 @@ const Save = {
     this.data = d;
   },
   write() {
-    try { localStorage.setItem(this.KEY, JSON.stringify(this.data)); localStorage.removeItem('koron-best'); } catch (e) { /* 保存できない環境でも遊べるように */ }
+    try { store.setItem(this.KEY, JSON.stringify(this.data)); store.removeItem('koron-best'); } catch (e) { /* 保存できない環境でも遊べるように */ }
   },
   st(id) {
     const ss = this.data.stages;
@@ -42,7 +42,7 @@ const Save = {
   },
   clear() {
     this.data = { v: 1, stages: {} };
-    try { localStorage.removeItem(this.KEY); localStorage.removeItem('koron-best'); } catch (e) { /* なにもしない */ }
+    try { store.removeItem(this.KEY); store.removeItem('koron-best'); } catch (e) { /* なにもしない */ }
   },
 };
 Save.load();

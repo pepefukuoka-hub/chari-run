@@ -14,9 +14,9 @@ const glCanvas = document.getElementById('gl');
 const gl = glCanvas.getContext('webgl2', { antialias: perfWantsAA(), alpha: false, powerPreference: 'high-performance' });
 function perfWantsAA() {
   try {
-    const q = localStorage.getItem('koron-quality') || 'auto';
+    const q = store.getItem('koron-quality') || 'auto';
     if (q === 'low') return false;
-    if (q === 'auto' && Number(localStorage.getItem('koron-perf-tier') || 0) >= 3) return false;
+    if (q === 'auto' && Number(store.getItem('koron-perf-tier') || 0) >= 3) return false;
   } catch (e) { /* localStorage が使えないときはそのまま */ }
   return true;
 }
