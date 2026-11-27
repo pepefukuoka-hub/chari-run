@@ -2477,9 +2477,10 @@ function readInputDir() {
   const cy = Cam.yaw;
   // カメラの前（奥）方向 = (-sin, -cos)（カメラは yaw 方向の後ろにいる）
   const fx = -Math.sin(cy), fz = -Math.cos(cy);
+  // 画面の右方向（カメラの右）= (-fz, fx)
   const rx = -fz, rz = fx;
-  const ax = fx * Input.my - rx * Input.mx;
-  const az = fz * Input.my - rz * Input.mx;
+  const ax = fx * Input.my + rx * Input.mx;
+  const az = fz * Input.my + rz * Input.mx;
   const l = Math.hypot(ax, az) || 1;
   inp.m = m; inp.ax = ax / l; inp.az = az / l;
   return inp;
