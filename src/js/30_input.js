@@ -87,15 +87,22 @@ function layoutTouch(w, h) {
   const s = Math.min(w, h);
   const land = w > h;
   const r = clamp(s * (land ? 0.105 : 0.1), 34, 58);
-  const right = w - S.r - Math.max(14, r * 0.35);
-  const bottom = h - S.b - Math.max(14, r * 0.35);
+  // 横持ちは親指の付け根に近い角へ寄せる（すき間を小さく）
+  const mg = land ? Math.max(6, r * 0.12) : Math.max(14, r * 0.35);
+  const right = w - S.r - mg;
+  const bottom = h - S.b - mg;
   const jr = r * 1.3;
   const jx = right - jr, jy = bottom - jr;
   const old = Input.btns;
   Input.btns = {
     jump: { x: jx, y: jy, r: jr, label: 'ジャンプ', col: '#ffd166' },
-    attack: { x: jx - jr - r * 1.25, y: jy + jr * 0.25, r: r * 0.95, label: 'パンチ', col: '#ff8a7a' },
-    crouch: { x: jx + jr * 0.15, y: jy - jr - r * 1.15, r: r * 0.9, label: 'しゃがむ', col: '#8fd3ff' },
+    // 横持ち：ジャンプを右下の角に置き、パンチは左に、しゃがむは左ななめ上に（角をかこむ扇形）
+    attack: land
+      ? { x: jx - (jr + r * 0.95 + 10), y: jy + jr * 0.3, r: r * 0.95, label: 'パンチ', col: '#ff8a7a' }
+      : { x: jx - jr - r * 1.25, y: jy + jr * 0.25, r: r * 0.95, label: 'パンチ', col: '#ff8a7a' },
+    crouch: land
+      ? { x: jx - (jr + r * 0.9 + 10) * 0.42, y: jy - (jr + r * 0.9 + 10) * 0.9, r: r * 0.9, label: 'しゃがむ', col: '#8fd3ff' }
+      : { x: jx + jr * 0.15, y: jy - jr - r * 1.15, r: r * 0.9, label: 'しゃがむ', col: '#8fd3ff' },
     pause: { x: w - S.r - 34, y: S.t + 32, r: 22, label: 'Ⅱ', small: true },
     camera: { x: w - S.r - 88, y: S.t + 32, r: 22, label: 'カメラ', small: true },
   };
@@ -105,8 +112,9 @@ function layoutTouch(w, h) {
     b.down = old[k] ? old[k].down : false;
   }
   Input.stickR = clamp(s * 0.14, 46, 74);
-  Input.stickHome.x = S.l + Input.stickR + 34;
-  Input.stickHome.y = h - S.b - Input.stickR - 30;
+  // スティックの定位置：横持ちは左下の角へ寄せる
+  Input.stickHome.x = S.l + Input.stickR + (land ? 14 : 34);
+  Input.stickHome.y = h - S.b - Input.stickR - (land ? 10 : 30);
 }
 
 // いちばん近いボタン（当たり判定は見た目より少し大きめ）
